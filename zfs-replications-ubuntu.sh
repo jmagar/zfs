@@ -146,6 +146,13 @@ pre_run_checks() {
         exit 1
     fi
     
+    # Check for rsync if rsync replication is enabled
+    if [[ "$REPLICATION" == "rsync" ]] && ! command -v rsync >/dev/null 2>&1; then
+        local msg="rsync not found. Please install rsync package for rsync replication."
+        send_notification "$msg" "error"
+        exit 1
+    fi
+    
     # Check if the source dataset exists
     if ! zfs list -H "$current_source_path" &>/dev/null; then
         local msg="Source dataset '$current_source_path' does not exist."

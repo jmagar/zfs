@@ -30,6 +30,27 @@ fi
 #     FUNCTIONS START HERE      #
 #--------------------------------
 
+# Pre-run checks for dependencies
+pre_run_checks() {
+    log_message "INFO" "Performing pre-run dependency checks..."
+    
+    # Check for essential ZFS utilities
+    if ! command -v zfs >/dev/null 2>&1; then
+        local msg='ZFS utilities not found. Please install zfsutils-linux package.'
+        send_notification "$msg" "error"
+        exit 1
+    fi
+    
+    # Check for rsync (used for data copying)
+    if ! command -v rsync >/dev/null 2>&1; then
+        local msg='rsync not found. Please install rsync package.'
+        send_notification "$msg" "error"
+        exit 1
+    fi
+    
+    log_message "INFO" "Pre-run dependency checks completed successfully"
+}
+
 # Logging and notification functions
 log_message() {
     local level="$1"
@@ -575,6 +596,9 @@ perform_conversions() {
 rotate_log
 log_message "INFO" "=== ZFS Auto Dataset Converter Started ==="
 log_message "INFO" "Configuration: DRY_RUN=$DRY_RUN, MOUNT_POINT=$MOUNT_POINT"
+
+# Check dependencies
+pre_run_checks
 
 # Validate configuration and sources
 validate_sources_and_work
