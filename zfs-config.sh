@@ -2,7 +2,16 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # #   Shared configuration file for ZFS management scripts                                                                              # #
 # #   Source this file in both zfs-auto-datasets.sh and zfs-replications.sh                                                          # # 
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+# Load environment variables from .env file if it exists
+SCRIPT_DIR_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR_CONFIG/.env" ]]; then
+    source "$SCRIPT_DIR_CONFIG/.env"
+elif [[ -f "$SCRIPT_DIR_CONFIG/.env.example" ]]; then
+    echo "WARNING: .env file not found. Please copy .env.example to .env and configure your settings."
+    echo "Using placeholder values - notifications and remote replication will not work."
+fi 
 
 # ---------------------------------------
 # CORE ZFS SETTINGS
@@ -12,32 +21,31 @@
 MOUNT_POINT="/mnt"                         # Base mount point for ZFS datasets
 
 # Dry run setting (applies to both scripts)
-DRY_RUN="no"                              # Set to "yes" for testing, "no" for actual execution
+DRY_RUN="no"                             # Set to "yes" for testing, "no" for actual execution
 
 # Primary ZFS pools and datasets
-SOURCE_POOL="tank"                        # ZFS pool containing source datasets
-SOURCE_DATASET="data"                     # Primary dataset to snapshot/replicate
+SOURCE_POOL="rpool"                       # ZFS pool containing source datasets
+SOURCE_DATASET="appdata"                  # Primary dataset to snapshot/replicate
 
 # ---------------------------------------
 # AUTO DATASET CONVERTER SETTINGS
 # ---------------------------------------
 
 # Docker Container Processing
-SHOULD_PROCESS_CONTAINERS="no"            # Set to "yes" to process Docker appdata
-SOURCE_POOL_APPDATA="tank"                # ZFS pool containing Docker appdata
+SHOULD_PROCESS_CONTAINERS="yes"           # Set to "yes" to process Docker appdata
+SOURCE_POOL_APPDATA="rpool"               # ZFS pool containing Docker appdata
 SOURCE_DATASET_APPDATA="appdata"          # Dataset name for Docker appdata
 
 # Virtual Machine Processing  
 SHOULD_PROCESS_VMS="no"                   # Set to "yes" to process VM vdisks
-SOURCE_POOL_VMS="tank"                    # ZFS pool containing VM domains
+SOURCE_POOL_VMS="rpool"                   # ZFS pool containing VM domains
 SOURCE_DATASET_VMS="domains"              # Dataset name for VM domains
 VM_FORCE_SHUTDOWN_WAIT="90"               # Seconds to wait before force stopping VM
 
 # Additional User-Defined Datasets
 # Add datasets in format "pool/dataset", one per line
 SOURCE_DATASETS_ARRAY=(
-    # Example: "tank/data"
-    # Example: "backup/important"
+    "rpool/compose"  # Docker compose files dataset
 )
 
 # Dataset Converter Options
@@ -50,10 +58,12 @@ BUFFER_ZONE=11                           # Percentage of extra space required be
 # ---------------------------------------
 
 # Dataset Selection
-SOURCE_DATASET_AUTO_SELECT="no"          # "yes" to auto-select all datasets in pool
+SOURCE_DATASET_AUTO_SELECT="yes"         # "yes" to auto-select all datasets in pool
 SOURCE_DATASET_AUTO_SELECT_EXCLUDE_PREFIX="backup_"  # Exclude datasets with this prefix
 SOURCE_DATASET_AUTO_SELECT_EXCLUDES=(
     # List dataset names to exclude from auto-selection
+    "ROOT"
+    "USERDATA"
     "temp"
     "scratch"
 )
@@ -71,7 +81,7 @@ REPLICATION="zfs"                         # "zfs", "rsync", or "none"
 
 # ZFS Replication Settings (only needed if REPLICATION="zfs")
 DESTINATION_POOL="backup"                 # Destination ZFS pool
-PARENT_DESTINATION_DATASET="replicas"     # Parent dataset for replicated data
+PARENT_DESTINATION_DATASET="squirts"      # Parent dataset for replicated data
 SYNCOID_MODE="strict-mirror"              # "strict-mirror" or "basic"
 
 # Rsync Replication Settings (only needed if REPLICATION="rsync")
@@ -79,16 +89,15 @@ PARENT_DESTINATION_FOLDER="/backup"       # Parent directory for rsync backups
 RSYNC_TYPE="incremental"                  # "incremental" or "mirror"
 
 # Remote Server Configuration
-DESTINATION_REMOTE="no"                   # "yes" for remote replication, "no" for local
-REMOTE_USER="root"                        # Username for remote server
-REMOTE_SERVER="192.168.1.100"            # Remote server hostname or IP
+DESTINATION_REMOTE="yes"                  # "yes" for remote replication, "no" for local
+# REMOTE_USER and REMOTE_SERVER are loaded from .env file
 
 # ---------------------------------------
 # SCHEDULING SETTINGS
 # ---------------------------------------
 
 # Enable automatic cron job setup
-ENABLE_SCHEDULING="no"                     # Set to "yes" to automatically setup cron jobs
+ENABLE_SCHEDULING="yes"                     # Set to "yes" to automatically setup cron jobs
 
 # Schedule for auto dataset converter (cron format: minute hour day month weekday)
 # Examples: "0 2 * * *" = daily at 2 AM, "0 */6 * * *" = every 6 hours
@@ -102,12 +111,11 @@ REPLICATION_SCHEDULE="0 3 * * *"          # Daily at 3 AM (after dataset convers
 # ---------------------------------------
 
 # Gotify Configuration
-GOTIFY_SERVER_URL="http://localhost:8080"  # Your Gotify server URL (no trailing slash)
-GOTIFY_APP_TOKEN=""                        # Your Gotify application token
+# GOTIFY_SERVER_URL and GOTIFY_APP_TOKEN are loaded from .env file
 notification_type="all"                    # "all" for both success & failure, "error" for only failure, "none" for no notifications
 
 # Logging Configuration  
-LOG_FILE="/var/log/zfs-scripts.log"       # Path to log file
+LOG_FILE="logs/zfs.log"       # Path to log file
 LOG_MAX_SIZE="10M"                         # Max log file size before rotation (e.g., 10M, 100K)
 LOG_MAX_FILES=5                            # Number of rotated log files to keep
 
@@ -129,6 +137,80 @@ stopped_containers=()
 stopped_vms=()
 converted_folders=()
 
+# Function to setup passwordless sudo for ZFS commands
+setup_passwordless_sudo() {
+    local current_user="${SUDO_USER:-$(whoami)}"
+    local sudoers_file="/etc/sudoers.d/zfs-scripts"
+    
+    # Check if sudoers file already exists and is properly configured
+    if [[ -f "$sudoers_file" ]]; then
+        if sudo grep -q "$current_user.*NOPASSWD.*zfs" "$sudoers_file" 2>/dev/null; then
+            echo "Passwordless sudo for ZFS commands already configured"
+            return 0
+        fi
+    fi
+    
+    echo ""
+    echo -e "\033[1;33m[NOTICE]\033[0m ZFS scripts require sudo privileges for automated execution."
+    echo -e "\033[1;33m[PROMPT]\033[0m Would you like to configure passwordless sudo for ZFS commands? (Y/n): "
+    read -r response
+    if [[ "$response" =~ ^[Nn]$ ]]; then
+        echo "Skipping passwordless sudo setup. You'll need to enter passwords during execution."
+        return 0
+    fi
+    
+    echo "Setting up passwordless sudo for ZFS commands..."
+    
+    # Create the sudoers configuration
+    local sudoers_content="# ZFS Scripts - Passwordless sudo configuration
+# Generated by zfs-config.sh on $(date)
+
+# Allow $current_user to run ZFS commands without password
+$current_user ALL=(ALL) NOPASSWD: /usr/sbin/zfs, /usr/sbin/zpool, /usr/sbin/sanoid, /usr/sbin/syncoid
+
+# Allow running syncoid as the original user while keeping ZFS privileges
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/sudo -u $current_user /usr/sbin/syncoid
+
+# Package management commands (for specific dependencies only)
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/apt update
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/apt install -y zfsutils-linux
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/apt install -y rsync
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/apt install -y jq
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/apt install -y sanoid
+
+# File system operations that the scripts need
+$current_user ALL=(ALL) NOPASSWD: /bin/mkdir -p *
+$current_user ALL=(ALL) NOPASSWD: /bin/cp /etc/sanoid/sanoid.defaults.conf *
+$current_user ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/sanoid/*
+$current_user ALL=(ALL) NOPASSWD: /bin/chmod 440 /etc/sudoers.d/zfs-scripts
+$current_user ALL=(ALL) NOPASSWD: /bin/grep * /etc/sudoers.d/zfs-scripts"
+    
+    # Write the sudoers file using a temporary file for safety
+    local temp_file=$(mktemp)
+    echo "$sudoers_content" > "$temp_file"
+    
+    # Validate the sudoers syntax
+    if visudo -c -f "$temp_file" >/dev/null 2>&1; then
+        # Copy to the actual sudoers directory
+        if sudo cp "$temp_file" "$sudoers_file"; then
+            sudo chmod 440 "$sudoers_file"
+            echo -e "\033[1;32m[SUCCESS]\033[0m Passwordless sudo configured for ZFS commands"
+            echo "Configuration saved to: $sudoers_file"
+        else
+            echo -e "\033[1;31m[ERROR]\033[0m Failed to create sudoers file"
+            rm -f "$temp_file"
+            return 1
+        fi
+    else
+        echo -e "\033[1;31m[ERROR]\033[0m Invalid sudoers syntax generated"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    rm -f "$temp_file"
+    echo ""
+}
+
 # Function to validate configuration
 validate_config() {
     local errors=0
@@ -136,22 +218,27 @@ validate_config() {
     # Check required Gotify settings if notifications enabled
     if [[ "$notification_type" != "none" ]]; then
         if [[ -z "$GOTIFY_SERVER_URL" ]]; then
-            echo "ERROR: GOTIFY_SERVER_URL must be set when notifications are enabled" >&2
+            echo "ERROR: GOTIFY_SERVER_URL must be set in .env file when notifications are enabled" >&2
             errors=$((errors + 1))
         fi
         if [[ -z "$GOTIFY_APP_TOKEN" ]]; then
-            echo "ERROR: GOTIFY_APP_TOKEN must be set when notifications are enabled" >&2
+            echo "ERROR: GOTIFY_APP_TOKEN must be set in .env file when notifications are enabled" >&2
             errors=$((errors + 1))
         fi
     fi
     
-    # Check log directory exists and is writable
+    # Check log directory exists and is writable, create if needed
     local log_dir
     log_dir=$(dirname "$LOG_FILE")
     if [[ ! -d "$log_dir" ]]; then
-        echo "ERROR: Log directory $log_dir does not exist" >&2
-        errors=$((errors + 1))
-    elif [[ ! -w "$log_dir" ]]; then
+        echo "Creating log directory: $log_dir"
+        if ! mkdir -p "$log_dir" 2>/dev/null; then
+            echo "ERROR: Cannot create log directory $log_dir" >&2
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    if [[ -d "$log_dir" && ! -w "$log_dir" ]]; then
         echo "ERROR: Log directory $log_dir is not writable" >&2
         errors=$((errors + 1))
     fi
@@ -161,6 +248,17 @@ validate_config() {
         echo "ERROR: Mount point $MOUNT_POINT does not exist" >&2
         errors=$((errors + 1))
     fi
+    
+    # Check remote server variables if remote replication is enabled
+    if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
+        if [[ -z "$REMOTE_USER" || -z "$REMOTE_SERVER" ]]; then
+            echo "ERROR: REMOTE_USER and REMOTE_SERVER must be set in .env file when remote replication is enabled" >&2
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    # Setup passwordless sudo for ZFS commands
+    setup_passwordless_sudo
     
     return $errors
 }
@@ -290,7 +388,8 @@ show_cron_schedule() {
     echo "  Snapshot & Replication: $REPLICATION_SCHEDULE"
 }
 
-# Export all configuration variables
+# Export all configuration variables and functions
+export -f setup_passwordless_sudo validate_config setup_cron_jobs remove_cron_jobs show_cron_schedule
 export GOTIFY_SERVER_URL GOTIFY_APP_TOKEN notification_type
 export LOG_FILE LOG_MAX_SIZE LOG_MAX_FILES
 export MOUNT_POINT DRY_RUN

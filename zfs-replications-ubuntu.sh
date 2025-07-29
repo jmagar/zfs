@@ -43,8 +43,18 @@ log_message() {
     # Write to log file
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
     
-    # Also print to stdout
-    echo "[$level] $message"
+    # Color codes for prettier output
+    local color=""
+    local reset="\033[0m"
+    case "$level" in
+        "SUCCESS") color="\033[1;32m" ;;  # Bold green
+        "ERROR")   color="\033[1;31m" ;;  # Bold red
+        "INFO")    color="\033[1;34m" ;;  # Bold blue
+        "WARNING") color="\033[1;33m" ;;  # Bold yellow
+    esac
+    
+    # Print to stdout with colors
+    echo -e "${color}[$level]${reset} $message"
 }
 
 rotate_log() {
@@ -111,10 +121,29 @@ send_notification() {
             "error") priority=8 ;;
         esac
         
-        curl -s -X POST "$GOTIFY_SERVER_URL/message" \
+        log_message "INFO" "Sending Gotify notification: $title"
+        
+        # Create proper JSON payload using jq
+        local json_payload
+        json_payload=$(jq -n \
+            --arg title "$title" \
+            --arg message "$message" \
+            --argjson priority "$priority" \
+            '{title: $title, message: $message, priority: $priority}')
+        
+        local response
+        response=$(curl -s -X POST "$GOTIFY_SERVER_URL/message" \
             -H "Content-Type: application/json" \
-            -d "{\"title\":\"$title\",\"message\":\"$message\",\"priority\":$priority}" \
-            -H "X-Gotify-Key: $GOTIFY_APP_TOKEN" >/dev/null 2>&1
+            -d "$json_payload" \
+            -H "X-Gotify-Key: $GOTIFY_APP_TOKEN" 2>&1)
+        
+        if [[ $? -eq 0 ]]; then
+            log_message "SUCCESS" "Gotify notification delivered successfully"
+        else
+            log_message "ERROR" "Gotify notification failed: $response"
+        fi
+    else
+        log_message "INFO" "Gotify not configured - skipping notification"
     fi
 }
 
@@ -134,9 +163,23 @@ pre_run_checks() {
     
     # Check for Sanoid if auto snapshots are enabled
     if [[ "$AUTO_SNAPSHOTS" == "yes" ]] && [[ ! -x "$SANOID_BINARY" ]]; then
-        local msg="Sanoid not found at $SANOID_BINARY. Please install Sanoid or disable auto snapshots."
-        send_notification "$msg" "error"
-        exit 1
+        log_message "ERROR" "Sanoid not found at $SANOID_BINARY"
+        echo -e "\033[1;33m[PROMPT]\033[0m Would you like to install Sanoid? (Y/n): "
+        read -r response
+        if [[ "$response" =~ ^[Nn]$ ]]; then
+            local msg="Sanoid not found. Please install Sanoid manually or disable auto snapshots."
+            send_notification "$msg" "error"
+            exit 1
+        else
+            log_message "INFO" "Installing Sanoid..."
+            sudo apt update && sudo apt install -y sanoid
+            if [[ ! -x "$SANOID_BINARY" ]]; then
+                local msg="Failed to install Sanoid. Please install manually: sudo apt install sanoid"
+                send_notification "$msg" "error"
+                exit 1
+            fi
+            log_message "SUCCESS" "Sanoid installed successfully"
+        fi
     fi
     
     # Check for Syncoid if ZFS replication is enabled
@@ -260,14 +303,14 @@ create_sanoid_config() {
     
     # Ensure the configuration directory exists
     if [[ ! -d "$current_sanoid_config_path" ]]; then
-        mkdir -p "$current_sanoid_config_path"
+        sudo mkdir -p "$current_sanoid_config_path"
     fi
     
     # Copy default configuration if it doesn't exist
     local defaults_file="$current_sanoid_config_path/sanoid.defaults.conf"
     if [[ ! -f "$defaults_file" ]]; then
         if [[ -f "/etc/sanoid/sanoid.defaults.conf" ]]; then
-            cp "/etc/sanoid/sanoid.defaults.conf" "$defaults_file"
+            sudo cp "/etc/sanoid/sanoid.defaults.conf" "$defaults_file"
         else
             log_message "WARNING" "Default Sanoid configuration not found at /etc/sanoid/sanoid.defaults.conf"
         fi
@@ -281,7 +324,7 @@ create_sanoid_config() {
     fi
     
     # Create the configuration file
-    cat > "$config_file" << EOF
+    sudo tee "$config_file" > /dev/null << EOF
 [$current_source_path]
 use_template = production
 recursive = yes
@@ -312,7 +355,7 @@ autosnap() {
     log_message "INFO" "Creating automatic snapshots for: $current_source_path"
     
     # Run sanoid to create snapshots
-    if "$SANOID_BINARY" --configdir="$current_sanoid_config_path" --take-snapshots; then
+    if sudo "$SANOID_BINARY" --configdir="$current_sanoid_config_path" --take-snapshots; then
         tune="2"  # Use different notification tune for snapshots
         local msg="Automatic snapshot creation successful for: $current_source_path"
         send_notification "$msg" "success"
@@ -337,7 +380,7 @@ autoprune() {
     log_message "INFO" "Pruning old snapshots for: $current_source_path"
     
     # Run sanoid to prune snapshots based on retention policy
-    "$SANOID_BINARY" --configdir="$current_sanoid_config_path" --prune-snapshots
+    sudo "$SANOID_BINARY" --configdir="$current_sanoid_config_path" --prune-snapshots
     
     log_message "INFO" "Snapshot pruning completed for: $current_source_path"
 }
@@ -401,7 +444,9 @@ zfs_replication() {
     
     # Perform the replication
     if [[ "$DRY_RUN" != "yes" ]]; then
-        if "$SYNCOID_BINARY" "${syncoid_flags[@]}" "$current_source_path" "$destination"; then
+        # Run syncoid as the original user to use their SSH keys, but with sudo for ZFS operations
+        local run_user="${SUDO_USER:-$(logname 2>/dev/null || whoami)}"
+        if sudo -u "$run_user" "$SYNCOID_BINARY" "${syncoid_flags[@]}" "$current_source_path" "$destination"; then
             local msg="ZFS replication successful from $current_source_path to $destination"
             send_notification "$msg" "success"
             log_message "SUCCESS" "$msg"
@@ -411,7 +456,24 @@ zfs_replication() {
             return 1
         fi
     else
-        log_message "INFO" "DRY RUN: Would replicate $current_source_path to $destination using syncoid"
+        log_message "INFO" "DRY RUN: Testing ZFS replication connection to $destination"
+        
+        # Test remote ZFS accessibility
+        if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
+            local remote_test
+            if remote_test=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "zfs list -o name -H '${DESTINATION_POOL}' 2>/dev/null"); then
+                log_message "SUCCESS" "DRY RUN: Remote ZFS pool '$DESTINATION_POOL' is accessible"
+            else
+                log_message "WARNING" "DRY RUN: Remote ZFS pool '$DESTINATION_POOL' is not accessible"
+            fi
+        else
+            if zfs list -o name -H "$DESTINATION_POOL" &>/dev/null; then
+                log_message "SUCCESS" "DRY RUN: Local ZFS pool '$DESTINATION_POOL' is accessible"
+            else
+                log_message "WARNING" "DRY RUN: Local ZFS pool '$DESTINATION_POOL' is not accessible"
+            fi
+        fi
+        
         local msg="DRY RUN: ZFS replication would run from $current_source_path to $destination"
         log_message "INFO" "$msg"
     fi
@@ -571,7 +633,7 @@ update_paths() {
     current_source_path="$SOURCE_POOL/$source_dataset_name"
     current_zfs_destination_path="$DESTINATION_POOL/$PARENT_DESTINATION_DATASET/${SOURCE_POOL}_${source_dataset_name}"
     current_destination_rsync_location="$PARENT_DESTINATION_FOLDER/${SOURCE_POOL}_${source_dataset_name}"
-    current_sanoid_config_path="$SANOID_CONFIG_DIR/${SOURCE_POOL}_${source_dataset_name}/"
+    current_sanoid_config_path="$SANOID_CONFIG_DIR${SOURCE_POOL}_${source_dataset_name}"
 }
 
 #
@@ -668,13 +730,21 @@ run_for_each_dataset() {
 main() {
     # Initialize logging
     rotate_log
-    log_message "INFO" "=== ZFS Snapshot & Replication Started ==="
+    echo ""
+    echo -e "\033[1;36m╔══════════════════════════════════════════════════════════╗\033[0m"
+    echo -e "\033[1;36m║           ZFS Snapshot & Replication                     ║\033[0m"
+    echo -e "\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m"
+    echo ""
     log_message "INFO" "Configuration: DRY_RUN=$DRY_RUN, SOURCE_POOL=$SOURCE_POOL, REPLICATION=$REPLICATION"
     
     # Execute the main processing function
     run_for_each_dataset
     
-    log_message "INFO" "=== ZFS Snapshot & Replication Completed ==="
+    echo ""
+    echo -e "\033[1;36m╔══════════════════════════════════════════════════════════╗\033[0m"
+    echo -e "\033[1;36m║              Replication Complete                        ║\033[0m"
+    echo -e "\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m"
+    echo ""
 }
 
 # Execute main function
