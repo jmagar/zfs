@@ -23,6 +23,21 @@ if ! validate_config; then
     exit 1
 fi
 
+# Check if running with sufficient privileges
+if [[ $EUID -ne 0 ]]; then
+    echo ""
+    echo -e "\033[1;33m[NOTICE]\033[0m This script requires root privileges to create ZFS datasets."
+    echo -e "\033[1;33m[PROMPT]\033[0m Would you like to restart with sudo? (Y/n): "
+    read -r response
+    if [[ "$response" =~ ^[Nn]$ ]]; then
+        echo "Exiting. Please run with: sudo $0"
+        exit 1
+    else
+        echo "Restarting with sudo..."
+        exec sudo "$0" "$@"
+    fi
+fi
+
 # Override DRY_RUN if needed (uncomment to force dry run for testing)
 # DRY_RUN="yes"
 
@@ -36,16 +51,65 @@ pre_run_checks() {
     
     # Check for essential ZFS utilities
     if ! command -v zfs >/dev/null 2>&1; then
-        local msg='ZFS utilities not found. Please install zfsutils-linux package.'
-        send_notification "$msg" "error"
-        exit 1
+        log_message "ERROR" "ZFS utilities not found"
+        echo -e "\033[1;33m[PROMPT]\033[0m Would you like to install zfsutils-linux? (Y/n): "
+        read -r response
+        if [[ "$response" =~ ^[Nn]$ ]]; then
+            local msg='ZFS utilities not found. Please install zfsutils-linux package manually.'
+            send_notification "$msg" "error"
+            exit 1
+        else
+            log_message "INFO" "Installing zfsutils-linux..."
+            sudo apt update && sudo apt install -y zfsutils-linux
+            if ! command -v zfs >/dev/null 2>&1; then
+                local msg='Failed to install ZFS utilities. Please install manually: sudo apt install zfsutils-linux'
+                send_notification "$msg" "error"
+                exit 1
+            fi
+            log_message "SUCCESS" "ZFS utilities installed successfully"
+        fi
     fi
     
     # Check for rsync (used for data copying)
     if ! command -v rsync >/dev/null 2>&1; then
-        local msg='rsync not found. Please install rsync package.'
-        send_notification "$msg" "error"
-        exit 1
+        log_message "ERROR" "rsync not found"
+        echo -e "\033[1;33m[PROMPT]\033[0m Would you like to install rsync? (Y/n): "
+        read -r response
+        if [[ "$response" =~ ^[Nn]$ ]]; then
+            local msg='rsync not found. Please install rsync package manually.'
+            send_notification "$msg" "error"
+            exit 1
+        else
+            log_message "INFO" "Installing rsync..."
+            sudo apt update && sudo apt install -y rsync
+            if ! command -v rsync >/dev/null 2>&1; then
+                local msg='Failed to install rsync. Please install manually: sudo apt install rsync'
+                send_notification "$msg" "error"
+                exit 1
+            fi
+            log_message "SUCCESS" "rsync installed successfully"
+        fi
+    fi
+    
+    # Check for jq (used for JSON formatting in notifications)
+    if ! command -v jq >/dev/null 2>&1; then
+        log_message "ERROR" "jq not found"
+        echo -e "\033[1;33m[PROMPT]\033[0m Would you like to install jq? (Y/n): "
+        read -r response
+        if [[ "$response" =~ ^[Nn]$ ]]; then
+            local msg='jq not found. Please install jq package manually for proper JSON formatting in notifications.'
+            send_notification "$msg" "error"
+            exit 1
+        else
+            log_message "INFO" "Installing jq..."
+            sudo apt update && sudo apt install -y jq
+            if ! command -v jq >/dev/null 2>&1; then
+                local msg='Failed to install jq. Please install manually: sudo apt install jq'
+                send_notification "$msg" "error"
+                exit 1
+            fi
+            log_message "SUCCESS" "jq installed successfully"
+        fi
     fi
     
     log_message "INFO" "Pre-run dependency checks completed successfully"
@@ -60,8 +124,18 @@ log_message() {
     # Write to log file
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
     
-    # Also print to stdout
-    echo "[$level] $message"
+    # Color codes for prettier output
+    local color=""
+    local reset="\033[0m"
+    case "$level" in
+        "SUCCESS") color="\033[1;32m" ;;  # Bold green
+        "ERROR")   color="\033[1;31m" ;;  # Bold red
+        "INFO")    color="\033[1;34m" ;;  # Bold blue
+        "WARNING") color="\033[1;33m" ;;  # Bold yellow
+    esac
+    
+    # Print to stdout with colors
+    echo -e "${color}[$level]${reset} $message"
 }
 
 rotate_log() {
@@ -128,10 +202,29 @@ send_notification() {
             "error") priority=8 ;;
         esac
         
-        curl -s -X POST "$GOTIFY_SERVER_URL/message" \
+        log_message "INFO" "Sending Gotify notification: $title"
+        
+        # Create proper JSON payload using jq
+        local json_payload
+        json_payload=$(jq -n \
+            --arg title "$title" \
+            --arg message "$message" \
+            --argjson priority "$priority" \
+            '{title: $title, message: $message, priority: $priority}')
+        
+        local response
+        response=$(curl -s -X POST "$GOTIFY_SERVER_URL/message" \
             -H "Content-Type: application/json" \
-            -d "{\"title\":\"$title\",\"message\":\"$message\",\"priority\":$priority}" \
-            -H "X-Gotify-Key: $GOTIFY_APP_TOKEN" >/dev/null 2>&1
+            -d "$json_payload" \
+            -H "X-Gotify-Key: $GOTIFY_APP_TOKEN" 2>&1)
+        
+        if [[ $? -eq 0 ]]; then
+            log_message "SUCCESS" "Gotify notification delivered successfully"
+        else
+            log_message "ERROR" "Gotify notification failed: $response"
+        fi
+    else
+        log_message "INFO" "Gotify not configured - skipping notification"
     fi
 }
 
@@ -363,7 +456,9 @@ normalize_name() {
 # Create new ZFS datasets from regular directories
 create_datasets() {
     local source_path="$1"
-    local full_source_path="$MOUNT_POINT/$source_path"
+    # Get the actual mountpoint from ZFS
+    local full_source_path
+    full_source_path=$(zfs get -H -o value mountpoint "$source_path" 2>/dev/null)
     
     [[ ! -d "$full_source_path" ]] && return 0
     
@@ -480,11 +575,34 @@ create_datasets() {
 # Print summary of converted datasets
 print_conversion_summary() {
     if [[ ${#converted_folders[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "\033[1;32m┌─────────────────────────────────────────────────────────┐\033[0m"
+        echo -e "\033[1;32m│  ✓ Successfully converted ${#converted_folders[@]} directories to ZFS datasets  │\033[0m"
+        echo -e "\033[1;32m└─────────────────────────────────────────────────────────┘\033[0m"
+        echo ""
+        
         local summary="Successfully converted ${#converted_folders[@]} directories to ZFS datasets:"
         for folder in "${converted_folders[@]}"; do
-            summary="$summary\n- $(basename "$folder")"
+            # Extract the dataset name from the full path
+            local folder_name=$(basename "$folder")
+            local dataset_name=""
+            
+            # Find which source dataset this folder belongs to
+            for source_path in "${SOURCE_DATASETS_ARRAY[@]}"; do
+                local source_mountpoint
+                source_mountpoint=$(zfs get -H -o value mountpoint "$source_path" 2>/dev/null)
+                if [[ "$folder" == "$source_mountpoint"* ]]; then
+                    dataset_name="${source_path}/${folder_name}"
+                    break
+                fi
+            done
+            
+            echo -e "  \033[1;32m→\033[0m \033[1m$dataset_name\033[0m"
+            echo -e "    \033[2m$folder\033[0m"
+            summary="$summary
+- $dataset_name ($folder)"
         done
-        log_message "SUCCESS" "$summary"
+        echo ""
         send_notification "$summary" "success"
     else
         log_message "INFO" "No directories were converted to datasets"
@@ -523,7 +641,15 @@ validate_sources_and_work() {
     local valid_sources=0
     
     for source_path in "${all_source_datasets[@]}"; do
-        local full_path="$MOUNT_POINT/$source_path"
+        # Get the actual mountpoint from ZFS
+        local full_path
+        full_path=$(zfs get -H -o value mountpoint "$source_path" 2>/dev/null)
+        
+        if [[ -z "$full_path" || "$full_path" == "-" ]]; then
+            log_message "ERROR" "Cannot get mountpoint for dataset: $source_path"
+            send_notification "ZFS Auto Dataset Converter: Cannot get mountpoint for dataset $source_path" "error"
+            exit 1
+        fi
         
         # Check if source exists
         if [[ ! -e "$full_path" ]]; then
@@ -594,7 +720,11 @@ perform_conversions() {
 
 # Initialize logging
 rotate_log
-log_message "INFO" "=== ZFS Auto Dataset Converter Started ==="
+echo ""
+echo -e "\033[1;36m╔══════════════════════════════════════════════════════════╗\033[0m"
+echo -e "\033[1;36m║            ZFS Auto Dataset Converter                    ║\033[0m"
+echo -e "\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m"
+echo ""
 log_message "INFO" "Configuration: DRY_RUN=$DRY_RUN, MOUNT_POINT=$MOUNT_POINT"
 
 # Check dependencies
@@ -617,4 +747,8 @@ start_virtual_machines
 # Print summary
 print_conversion_summary
 
-log_message "INFO" "=== ZFS Auto Dataset Converter Completed ==="
+echo ""
+echo -e "\033[1;36m╔══════════════════════════════════════════════════════════╗\033[0m"
+echo -e "\033[1;36m║                    Conversion Complete                   ║\033[0m"
+echo -e "\033[1;36m╚══════════════════════════════════════════════════════════╝\033[0m"
+echo ""

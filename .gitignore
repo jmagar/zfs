@@ -1,0 +1,14 @@
+# Environment variables with sensitive data
+.env
+
+# Log files
+logs/
+*.log
+
+# Temporary files
+*.tmp
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
