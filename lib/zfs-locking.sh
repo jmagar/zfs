@@ -114,28 +114,14 @@ acquire_lock() {
         }
     fi
 
-    # Find available file descriptor
+    # Allocate an available file descriptor automatically (Bash 4.1+)
     local fd
-    for ((fd=10; fd<200; fd++)); do
-        if ! { true >&$fd; } 2>/dev/null; then
-            break
-        fi
-    done
-
-    if [[ $fd -ge 200 ]]; then
+    if ! exec {fd}> "$lock_file" 2>/dev/null; then
         if declare -F error >/dev/null 2>&1; then
-            error "No available file descriptors for lock"
+            error "Failed to open file descriptor for lock: $lock_file"
         fi
         return 1
     fi
-
-    # Open file descriptor
-    eval "exec $fd>$lock_file" || {
-        if declare -F error >/dev/null 2>&1; then
-            error "Failed to open lock file: $lock_file"
-        fi
-        return 1
-    }
 
     # Try to acquire lock with timeout
     if declare -F log_message >/dev/null 2>&1; then

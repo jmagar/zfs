@@ -20,7 +20,7 @@ teardown_file() {
 # Setup for each test
 setup() {
     # Source the common library
-    export SCRIPT_DIR="/home/user/zfs"
+    export SCRIPT_DIR="${BATS_TEST_DIRNAME%/*}"
     source "$SCRIPT_DIR/lib/zfs-common.sh"
 
     # Reset log file for each test

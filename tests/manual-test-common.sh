@@ -12,7 +12,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-SCRIPT_DIR="/home/user/zfs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_TEMP_DIR=$(mktemp -d)
 export LOG_FILE="$TEST_TEMP_DIR/test.log"
 export LOG_MAX_SIZE="10M"

@@ -111,26 +111,41 @@ _tx_get_lock_file() {
 # Acquire lock for transaction
 # Arguments:
 #   $1 - Transaction ID
+# Outputs:
+#   File descriptor number on success
 # Returns:
 #   0 on success, 1 on failure
 #######################################
 _tx_acquire_lock() {
     local tx_id="$1"
     local lock_file=$(_tx_get_lock_file "$tx_id")
-    local max_wait=30
-    local waited=0
+    local timeout=30
 
-    while [[ -f "$lock_file" ]] && [[ $waited -lt $max_wait ]]; do
-        sleep 1
-        waited=$((waited + 1))
-    done
+    # Create lock file if it doesn't exist
+    touch "$lock_file" 2>/dev/null || {
+        echo "ERROR: Cannot create lock file: $lock_file" >&2
+        return 1
+    }
 
-    if [[ -f "$lock_file" ]]; then
-        echo "ERROR: Failed to acquire lock for transaction $tx_id (timeout)" >&2
+    # Allocate file descriptor and acquire exclusive lock atomically
+    local lock_fd
+    if ! exec {lock_fd}> "$lock_file" 2>/dev/null; then
+        echo "ERROR: Cannot open lock file: $lock_file" >&2
         return 1
     fi
 
-    echo "$$" > "$lock_file"
+    # Try to acquire exclusive lock with timeout
+    if ! flock -x -w $timeout $lock_fd 2>/dev/null; then
+        exec {lock_fd}>&-  # Close FD
+        echo "ERROR: Failed to acquire lock for transaction $tx_id (timeout after ${timeout}s)" >&2
+        return 1
+    fi
+
+    # Write PID to lock file for debugging
+    echo "$$" >&$lock_fd
+
+    # Store FD for later release (export to parent scope)
+    echo "$lock_fd"
     return 0
 }
 
@@ -138,14 +153,23 @@ _tx_acquire_lock() {
 # Release lock for transaction
 # Arguments:
 #   $1 - Transaction ID
+#   $2 - Lock file descriptor
 # Returns:
 #   0 on success
 #######################################
 _tx_release_lock() {
     local tx_id="$1"
+    local lock_fd="$2"  # Now receives FD as second parameter
     local lock_file=$(_tx_get_lock_file "$tx_id")
-    rm -f "$lock_file" 2>/dev/null
-    return 0
+
+    # Release flock and close FD
+    if [[ -n "$lock_fd" && "$lock_fd" =~ ^[0-9]+$ ]]; then
+        flock -u $lock_fd 2>/dev/null || true
+        exec {lock_fd}>&- 2>/dev/null || true
+    fi
+
+    # Remove lock file
+    rm -f "$lock_file" 2>/dev/null || true
 }
 
 #######################################
@@ -219,9 +243,8 @@ transaction_start() {
     local state_file=$(_tx_get_state_file "$tx_id")
 
     # Acquire lock
-    if ! _tx_acquire_lock "$tx_id"; then
-        return 1
-    fi
+    local lock_fd
+    lock_fd=$(_tx_acquire_lock "$tx_id") || return 1
 
     # Create transaction state
     local timestamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
@@ -244,12 +267,12 @@ EOF
 
     # Write state file atomically
     if ! _tx_write_state_atomic "$state_file" "$state_content"; then
-        _tx_release_lock "$tx_id"
+        _tx_release_lock "$tx_id" "$lock_fd"
         return 1
     fi
 
     # Release lock
-    _tx_release_lock "$tx_id"
+    _tx_release_lock "$tx_id" "$lock_fd"
 
     # Log transaction start
     if declare -F log_message >/dev/null 2>&1; then
@@ -288,15 +311,14 @@ transaction_update_state() {
     fi
 
     # Acquire lock
-    if ! _tx_acquire_lock "$tx_id"; then
-        return 1
-    fi
+    local lock_fd
+    lock_fd=$(_tx_acquire_lock "$tx_id") || return 1
 
     # Read current state
     local current_state
     if ! current_state=$(cat "$state_file" 2>/dev/null); then
         echo "ERROR: Failed to read transaction state: $tx_id" >&2
-        _tx_release_lock "$tx_id"
+        _tx_release_lock "$tx_id" "$lock_fd"
         return 1
     fi
 
@@ -311,29 +333,21 @@ transaction_update_state() {
             --arg err "$error_msg" \
             '.state = $state | .updated_at = $time | if $err != "" then .error_message = $err else . end')
     else
-        # Fallback: manual JSON update
-        updated_state=$(echo "$current_state" | sed \
-            -e "s/\"state\": \"[^\"]*\"/\"state\": \"$new_state\"/" \
-            -e "s/\"updated_at\": \"[^\"]*\"/\"updated_at\": \"$timestamp\"/")
-
-        if [[ -n "$error_msg" ]]; then
-            # Add error message if not present
-            if ! echo "$updated_state" | grep -q "error_message"; then
-                updated_state=$(echo "$updated_state" | sed 's/}$/, "error_message": "'"$error_msg"'"}/')
-            else
-                updated_state=$(echo "$updated_state" | sed "s/\"error_message\": \"[^\"]*\"/\"error_message\": \"$error_msg\"/")
-            fi
-        fi
+        # jq is required for safe JSON manipulation
+        echo "ERROR: jq is required for transaction state updates but is not available" >&2
+        echo "ERROR: Please install jq: sudo apt install jq" >&2
+        _tx_release_lock "$tx_id" "$lock_fd"
+        return 1
     fi
 
     # Write updated state atomically
     if ! _tx_write_state_atomic "$state_file" "$updated_state"; then
-        _tx_release_lock "$tx_id"
+        _tx_release_lock "$tx_id" "$lock_fd"
         return 1
     fi
 
     # Release lock
-    _tx_release_lock "$tx_id"
+    _tx_release_lock "$tx_id" "$lock_fd"
 
     # Log state update
     if declare -F log_message >/dev/null 2>&1; then

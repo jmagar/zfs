@@ -207,12 +207,28 @@ send_notification() {
     esac
 
     # Send notification
-    # Note: Using basic escaping since we don't have jq dependency yet
-    local escaped_message="${message//\"/\\\"}"
+    # Use jq for safe JSON encoding to prevent injection
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "WARNING: jq is required for safe notification delivery but is not installed" >&2
+        echo "         Skipping notification. Install with: sudo apt install jq" >&2
+        return 0  # Not a fatal error, just skip notification
+    fi
+
+    # Build JSON payload safely with jq
+    local json_payload
+    json_payload=$(jq -n \
+        --arg title "$title" \
+        --arg message "$message" \
+        --argjson priority "$priority" \
+        '{title: $title, message: $message, priority: $priority}') || {
+        echo "ERROR: Failed to encode notification JSON" >&2
+        return 1
+    }
+
     if ! curl -s -S -X POST "$GOTIFY_SERVER_URL/message" \
             -H "Content-Type: application/json" \
             -H "X-Gotify-Key: $GOTIFY_APP_TOKEN" \
-            -d "{\"title\":\"$title\",\"message\":\"$escaped_message\",\"priority\":$priority}" \
+            -d "$json_payload" \
             >/dev/null 2>&1; then
         log_message "WARNING" "Failed to send Gotify notification"
         return 1
