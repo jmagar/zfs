@@ -17,6 +17,27 @@ else
     exit 1
 fi
 
+# Source the common library for shared functions
+if [[ -f "$SCRIPT_DIR/lib/zfs-common.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-common.sh"
+else
+    log_message "WARNING" "Common library not found - some functions may not be available"
+fi
+
+# Source the validation library for input validation
+if [[ -f "$SCRIPT_DIR/lib/zfs-validation.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-validation.sh"
+else
+    log_message "WARNING" "Validation library not found - operating without input validation"
+fi
+
+# Source the error handling library
+if [[ -f "$SCRIPT_DIR/lib/zfs-error-handling.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-error-handling.sh"
+else
+    log_message "WARNING" "Error handling library not found - operating without enhanced error handling"
+fi
+
 # Source the locking library for race condition prevention
 if [[ -f "$SCRIPT_DIR/lib/zfs-locking.sh" ]]; then
     source "$SCRIPT_DIR/lib/zfs-locking.sh"
@@ -173,12 +194,97 @@ send_notification() {
 #
 is_zfs_dataset() {
     local location="$1"
-    
-    if zfs list -H -o mounted,mountpoint | grep -q "^yes"$'\t'"$location$"; then
+
+    # Validate input first
+    if [[ -z "$location" ]]; then
+        log_message "ERROR" "is_zfs_dataset: location cannot be empty"
+        return 1
+    fi
+
+    # Use validate_path if available, otherwise basic validation
+    if declare -F validate_path >/dev/null 2>&1; then
+        if ! validate_path "$location"; then
+            log_message "ERROR" "Invalid location path: $location"
+            return 1
+        fi
+    fi
+
+    # Use awk for safe fixed-string matching instead of grep with regex
+    # This prevents regex injection attacks via crafted paths
+    if zfs list -H -o mounted,mountpoint 2>/dev/null | awk -v loc="$location" '$1 == "yes" && $2 == loc {exit 0} END {exit 1}'; then
         return 0
     else
         return 1
     fi
+}
+
+#######################################
+# Safe directory removal with validation
+# Performs comprehensive validation before destructive operations
+# Arguments:
+#   $1 - Base path
+#   $2 - Relative path to remove
+# Returns:
+#   0 on success, 1 on error
+#######################################
+safe_remove_directory() {
+    local base_path="$1"
+    local relative_path="$2"
+    local full_path="${base_path}/${relative_path}"
+
+    # Validation checks
+    if [[ -z "$relative_path" ]]; then
+        log_message "ERROR" "Cannot remove directory: relative path is empty"
+        return 1
+    fi
+
+    if [[ "$relative_path" =~ \.\. ]]; then
+        log_message "ERROR" "Cannot remove directory: path contains .."
+        return 1
+    fi
+
+    if [[ "$relative_path" =~ ^/ ]]; then
+        log_message "ERROR" "Cannot remove directory: relative path starts with /"
+        return 1
+    fi
+
+    # Verify the path is within base_path using realpath
+    local real_full_path
+    if ! real_full_path=$(realpath -m "$full_path" 2>/dev/null); then
+        log_message "ERROR" "Cannot resolve path: $full_path"
+        return 1
+    fi
+
+    local real_base_path
+    if ! real_base_path=$(realpath -m "$base_path" 2>/dev/null); then
+        log_message "ERROR" "Cannot resolve base path: $base_path"
+        return 1
+    fi
+
+    if [[ ! "$real_full_path" =~ ^"$real_base_path"/ ]]; then
+        log_message "ERROR" "Path $full_path is outside base path $base_path"
+        return 1
+    fi
+
+    # Verify directory exists
+    if [[ ! -d "$full_path" ]]; then
+        log_message "WARNING" "Directory does not exist: $full_path"
+        return 0  # Not an error if already gone
+    fi
+
+    # Perform deletion with logging
+    log_message "INFO" "Removing directory: $full_path"
+    if [[ "$DRY_RUN" != "yes" ]]; then
+        if ! rm -rf "$full_path"; then
+            log_message "ERROR" "Failed to remove directory: $full_path"
+            return 1
+        fi
+        log_message "SUCCESS" "Directory removed: $full_path"
+    else
+        log_message "INFO" "DRY RUN: Would remove directory: $full_path"
+    fi
+
+    return 0
 }
 
 #-----------------------------------------------------------------------------------------------------------------------------------  #
@@ -591,8 +697,11 @@ create_datasets() {
                             
                             if [[ "$source_file_count" -eq "$destination_file_count" && "$source_total_size" -eq "$destination_total_size" ]]; then
                                 log_message "SUCCESS" "Data validation successful - cleaning up temporary directory"
-                                rm -rf "${full_source_path}/${normalized_base_entry}_temp"
-                                converted_folders+=("$entry")
+                                if safe_remove_directory "$full_source_path" "${normalized_base_entry}_temp"; then
+                                    converted_folders+=("$entry")
+                                else
+                                    log_message "ERROR" "Failed to cleanup temporary directory - please remove manually"
+                                fi
                             else
                                 log_message "ERROR" "Data validation failed. Source: $source_file_count files, $source_total_size bytes. Destination: $destination_file_count files, $destination_total_size bytes"
                             fi
@@ -684,7 +793,8 @@ validate_sources_and_work() {
         fi
         
         # Check if source is a ZFS dataset
-        if ! zfs list -o name -H | grep -qE "^${source_path}$"; then
+        # Use direct zfs list instead of grep to prevent regex injection
+        if ! zfs list -H "$source_path" >/dev/null 2>&1; then
             log_message "ERROR" "Source $source_path is not a ZFS dataset. Sources must be datasets to host child datasets."
             send_notification "ZFS Auto Dataset Converter: Source $source_path is not a ZFS dataset" "error"
             exit 1
@@ -700,8 +810,10 @@ validate_sources_and_work() {
                 [[ ! -e "$entry" ]] && continue
                 local base_entry=$(basename "$entry")
                 
-                if [[ -d "$entry" && ! "$base_entry" =~ _temp$ ]] && 
-                   ! zfs list -o name -H | grep -qE "^${source_path}/${base_entry}$"; then
+                # Use direct zfs list instead of grep to prevent regex injection
+                local dataset_name="${source_path}/${base_entry}"
+                if [[ -d "$entry" && ! "$base_entry" =~ _temp$ ]] &&
+                   ! zfs list -H "$dataset_name" >/dev/null 2>&1; then
                     current_folder_count=$((current_folder_count + 1))
                 fi
             done
