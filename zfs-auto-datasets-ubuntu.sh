@@ -17,6 +17,20 @@ else
     exit 1
 fi
 
+# Source the locking library for race condition prevention
+if [[ -f "$SCRIPT_DIR/lib/zfs-locking.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-locking.sh"
+else
+    log_message "WARNING" "Locking library not found - operating without concurrency protection"
+fi
+
+# Source the transaction library for rollback support
+if [[ -f "$SCRIPT_DIR/lib/zfs-transactions.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-transactions.sh"
+else
+    log_message "WARNING" "Transaction library not found - operating without rollback protection"
+fi
+
 # Validate configuration
 if ! validate_config; then
     echo "Configuration validation failed. Please check zfs-config.sh" >&2
@@ -49,6 +63,25 @@ pre_run_checks() {
     fi
     
     log_message "INFO" "Pre-run dependency checks completed successfully"
+}
+
+# Recover partial conversions from previous runs
+recover_partial_conversions() {
+    log_message "INFO" "Checking for partial conversions to recover..."
+
+    # Check if transaction library is available
+    if ! declare -F transaction_recover_all >/dev/null 2>&1; then
+        log_message "WARNING" "Transaction library not available - skipping recovery"
+        return 0
+    fi
+
+    # Recover all pending transactions
+    transaction_recover_all
+
+    # Clean up old transaction files (older than 30 days)
+    transaction_cleanup 30
+
+    log_message "INFO" "Transaction recovery check completed"
 }
 
 # Logging and notification functions
@@ -197,9 +230,47 @@ stop_docker_containers() {
         
         if [[ "$stop_container" == "true" ]]; then
             if [[ "$DRY_RUN" != "yes" ]]; then
-                docker stop "$container" >/dev/null 2>&1
-                stopped_containers+=("$container_name")
-                log_message "INFO" "Stopped container: $container_name"
+                # Acquire lock for this container to prevent concurrent operations
+                local lock_file
+                if lock_file=$(container_lock_acquire "$container" 10 2>/dev/null); then
+                    # Verify container still exists and is running
+                    local container_state
+                    container_state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+
+                    if [[ "$container_state" == "running" ]]; then
+                        # Stop the container
+                        if docker stop "$container" >/dev/null 2>&1; then
+                            # Verify it actually stopped
+                            local stop_verified=false
+                            for ((i=0; i<10; i++)); do
+                                container_state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+                                if [[ "$container_state" != "running" ]]; then
+                                    stop_verified=true
+                                    break
+                                fi
+                                sleep 0.5
+                            done
+
+                            if [[ "$stop_verified" == "true" ]]; then
+                                stopped_containers+=("$container_name")
+                                log_message "INFO" "Stopped container: $container_name (state: $container_state)"
+                            else
+                                log_message "ERROR" "Container $container_name may not have stopped properly"
+                            fi
+                        else
+                            log_message "ERROR" "Failed to stop container: $container_name"
+                        fi
+                    elif [[ "$container_state" == "missing" ]]; then
+                        log_message "WARNING" "Container $container no longer exists"
+                    else
+                        log_message "INFO" "Container $container_name already stopped (state: $container_state)"
+                    fi
+
+                    # Release lock
+                    container_lock_release "$container"
+                else
+                    log_message "WARNING" "Could not acquire lock for container $container - skipping"
+                fi
             else
                 log_message "INFO" "DRY RUN: Would stop container: $container_name"
                 stopped_containers+=("$container_name")
@@ -299,23 +370,85 @@ stop_virtual_machines() {
         
         if ! is_zfs_dataset "$combined_path"; then
             log_message "INFO" "VM $vm vdisk is not in a ZFS dataset - will stop for conversion"
-            
+
             if [[ "$DRY_RUN" != "yes" ]]; then
-                virsh shutdown "$vm" >/dev/null 2>&1
-                
-                # Wait for VM to shutdown gracefully
-                local start_time=$(date +%s)
-                while virsh dominfo "$vm" 2>/dev/null | grep -q 'running'; do
-                    sleep 5
-                    local current_time=$(date +%s)
-                    if (( current_time - start_time >= VM_FORCE_SHUTDOWN_WAIT )); then
-                        log_message "INFO" "VM $vm did not shutdown gracefully after ${VM_FORCE_SHUTDOWN_WAIT}s - forcing shutdown"
-                        virsh destroy "$vm" >/dev/null 2>&1
-                        break
+                # Acquire lock for this VM to prevent concurrent operations
+                local lock_file
+                if lock_file=$(vm_lock_acquire "$vm" 10 2>/dev/null); then
+                    # Get initial VM state using virsh domstate (more reliable than dominfo)
+                    local vm_state
+                    vm_state=$(virsh domstate "$vm" 2>/dev/null || echo "missing")
+
+                    if [[ "$vm_state" == "running" ]]; then
+                        # Initiate graceful shutdown
+                        if virsh shutdown "$vm" >/dev/null 2>&1; then
+                            log_message "INFO" "Initiated graceful shutdown for VM: $vm"
+
+                            # Poll VM state with proper timeout
+                            local start_time=$(date +%s)
+                            local shutdown_complete=false
+
+                            while true; do
+                                # Get current state directly without grep
+                                vm_state=$(virsh domstate "$vm" 2>/dev/null || echo "missing")
+
+                                # Check if VM has stopped
+                                if [[ "$vm_state" != "running" && "$vm_state" != "in shutdown" ]]; then
+                                    shutdown_complete=true
+                                    log_message "INFO" "VM $vm shutdown complete (state: $vm_state)"
+                                    break
+                                fi
+
+                                # Check timeout
+                                local current_time=$(date +%s)
+                                local elapsed=$((current_time - start_time))
+
+                                if [[ $elapsed -ge ${VM_FORCE_SHUTDOWN_WAIT:-90} ]]; then
+                                    log_message "WARNING" "VM $vm did not shutdown gracefully after ${VM_FORCE_SHUTDOWN_WAIT}s"
+                                    break
+                                fi
+
+                                sleep 2
+                            done
+
+                            # Force shutdown if necessary
+                            if [[ "$shutdown_complete" == "false" ]]; then
+                                vm_state=$(virsh domstate "$vm" 2>/dev/null || echo "missing")
+                                if [[ "$vm_state" == "running" || "$vm_state" == "in shutdown" ]]; then
+                                    log_message "INFO" "Forcing shutdown of VM: $vm"
+                                    if virsh destroy "$vm" >/dev/null 2>&1; then
+                                        # Verify forced shutdown
+                                        sleep 2
+                                        vm_state=$(virsh domstate "$vm" 2>/dev/null || echo "missing")
+                                        if [[ "$vm_state" != "running" ]]; then
+                                            log_message "INFO" "VM $vm force shutdown successful (state: $vm_state)"
+                                            stopped_vms+=("$vm")
+                                        else
+                                            log_message "ERROR" "Failed to force shutdown VM: $vm"
+                                        fi
+                                    else
+                                        log_message "ERROR" "Force shutdown command failed for VM: $vm"
+                                    fi
+                                else
+                                    stopped_vms+=("$vm")
+                                fi
+                            else
+                                stopped_vms+=("$vm")
+                            fi
+                        else
+                            log_message "ERROR" "Failed to initiate shutdown for VM: $vm"
+                        fi
+                    elif [[ "$vm_state" == "missing" ]]; then
+                        log_message "WARNING" "VM $vm no longer exists or is not defined"
+                    else
+                        log_message "INFO" "VM $vm already stopped (state: $vm_state)"
                     fi
-                done
-                stopped_vms+=("$vm")
-                log_message "INFO" "Stopped VM: $vm"
+
+                    # Release lock
+                    vm_lock_release "$vm"
+                else
+                    log_message "WARNING" "Could not acquire lock for VM $vm - skipping"
+                fi
             else
                 log_message "INFO" "DRY RUN: Would stop VM: $vm"
                 stopped_vms+=("$vm")
@@ -386,46 +519,57 @@ create_datasets() {
         local normalized_base_entry
         normalized_base_entry=$(normalize_name "$base_entry")
         
-        # Skip if dataset already exists
-        if zfs list -o name -H | grep -qE "^${source_path}/${normalized_base_entry}$"; then
-            log_message "INFO" "Dataset ${source_path}/${normalized_base_entry} already exists - skipping"
-            continue
-        fi
-        
         # Only process directories
         if [[ ! -d "$entry" ]]; then
             continue
         fi
-        
+
         log_message "INFO" "Processing directory: $entry"
-        
+
+        # Acquire dataset lock to prevent concurrent creation
+        local dataset_name="${source_path}/${normalized_base_entry}"
+        local lock_file
+        if ! lock_file=$(dataset_lock_acquire "$dataset_name" 30 2>/dev/null); then
+            log_message "WARNING" "Could not acquire lock for dataset $dataset_name - skipping"
+            continue
+        fi
+
+        # Re-check if dataset exists after acquiring lock (TOCTOU protection)
+        if zfs list -H -o name "$dataset_name" >/dev/null 2>&1; then
+            log_message "INFO" "Dataset $dataset_name already exists (created by another process) - skipping"
+            dataset_lock_release "$dataset_name"
+            continue
+        fi
+
         # Calculate directory size
         local folder_size
         folder_size=$(du -sb "$entry" 2>/dev/null | cut -f1)
         local folder_size_hr
         folder_size_hr=$(du -sh "$entry" 2>/dev/null | cut -f1)
-        
+
         log_message "INFO" "Directory size: $folder_size_hr"
-        
+
         # Calculate buffer zone
         local buffer_zone_size=$((folder_size * BUFFER_ZONE / 100))
-        
+
         # Check available space
-        if zfs list -o name -H | grep -qE "^${source_path}$" && 
-           (( $(zfs list -o avail -p -H "${source_path}" 2>/dev/null || echo 0) >= buffer_zone_size )); then
-            
-            log_message "INFO" "Creating dataset ${source_path}/${normalized_base_entry}..."
-            
+        local parent_avail
+        parent_avail=$(zfs list -o avail -p -H "${source_path}" 2>/dev/null || echo 0)
+
+        if [[ "$parent_avail" -ge "$buffer_zone_size" ]]; then
+            log_message "INFO" "Creating dataset $dataset_name..."
+
             if [[ "$DRY_RUN" != "yes" ]]; then
                 # Move original to temp location
                 if ! mv "$entry" "${full_source_path}/${normalized_base_entry}_temp"; then
                     log_message "ERROR" "Failed to rename $entry to temporary location"
+                    dataset_lock_release "$dataset_name"
                     continue
                 fi
-                
+
                 # Create new dataset
-                if zfs create "${source_path}/${normalized_base_entry}"; then
-                    log_message "SUCCESS" "Created ZFS dataset: ${source_path}/${normalized_base_entry}"
+                if zfs create "$dataset_name"; then
+                    log_message "SUCCESS" "Created ZFS dataset: $dataset_name"
                     
                     # Copy data using rsync
                     log_message "INFO" "Copying data to new dataset..."
@@ -462,16 +606,23 @@ create_datasets() {
                         log_message "ERROR" "Failed to copy data to new dataset"
                     fi
                 else
-                    log_message "ERROR" "Failed to create ZFS dataset: ${source_path}/${normalized_base_entry}"
+                    log_message "ERROR" "Failed to create ZFS dataset: $dataset_name"
                     # Restore original directory name
                     mv "${full_source_path}/${normalized_base_entry}_temp" "$entry" 2>/dev/null
+                    dataset_lock_release "$dataset_name"
+                    continue
                 fi
+
+                # Release dataset lock after successful creation
+                dataset_lock_release "$dataset_name"
             else
-                log_message "INFO" "DRY RUN: Would create dataset ${source_path}/${normalized_base_entry}"
+                log_message "INFO" "DRY RUN: Would create dataset $dataset_name"
                 converted_folders+=("$entry")
+                dataset_lock_release "$dataset_name"
             fi
         else
             log_message "ERROR" "Insufficient space for converting $entry (need $folder_size_hr + ${BUFFER_ZONE}% buffer)"
+            dataset_lock_release "$dataset_name"
         fi
     done
 }
