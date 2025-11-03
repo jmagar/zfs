@@ -287,8 +287,26 @@ safe_remove_directory() {
     return 0
 }
 
-#-----------------------------------------------------------------------------------------------------------------------------------  #
-# Check running containers and stop those whose bind mounts are folders (not datasets) that need conversion                       #
+#######################################
+# Stop Docker containers with bind mounts on non-ZFS directories
+#
+# Identifies running containers with bind mounts in the appdata directory
+# that point to regular directories (not ZFS datasets). Stops these containers
+# gracefully with locking to prevent race conditions.
+#
+# Globals:
+#   SHOULD_PROCESS_CONTAINERS - Whether to process containers
+#   SOURCE_POOL_APPDATA - ZFS pool for appdata
+#   SOURCE_DATASET_APPDATA - Dataset name for appdata
+#   MOUNT_POINT - Base mount point
+#   stopped_containers - Array to track stopped containers (output)
+# Arguments:
+#   None
+# Returns:
+#   0 on success, 1 on error
+# Outputs:
+#   Log messages via log_message
+#######################################
 stop_docker_containers() {
     if [[ "$SHOULD_PROCESS_CONTAINERS" != "yes" ]]; then
         return 0
@@ -598,8 +616,33 @@ normalize_name() {
     echo "$normalized_name"
 }
 
-#----------------------------------------------------------------------------------    
+#######################################
 # Create new ZFS datasets from regular directories
+#
+# Converts regular directories to ZFS datasets with full data migration.
+# Implements safe conversion with:
+# - Lock acquisition to prevent concurrent modifications (TOCTOU protection)
+# - Temporary rename during conversion for atomic-like behavior
+# - Space availability checks with configurable buffer zone
+# - Data validation using rsync with checksum verification
+# - Optional cleanup of temporary directories after validation
+# - Transaction support for rollback on failure
+#
+# Globals:
+#   MOUNT_POINT - Base mount point for ZFS datasets
+#   BUFFER_ZONE - Percentage of extra space required
+#   DRY_RUN - Whether to perform actual operations
+#   CLEANUP_TEMP_DIRS - Whether to remove temp dirs after success
+#   REPLACE_SPACES - Whether to replace spaces in names
+#   LOG_FILE - Log file path
+#   converted_folders - Array to track conversions (output)
+# Arguments:
+#   $1 - Source dataset path (e.g., "tank/data")
+# Returns:
+#   0 on success, skips directories that can't be processed
+# Outputs:
+#   Log messages and rsync progress via log_message
+#######################################
 create_datasets() {
     local source_path="$1"
     local full_source_path="$MOUNT_POINT/$source_path"
@@ -677,9 +720,12 @@ create_datasets() {
                 if zfs create "$dataset_name"; then
                     log_message "SUCCESS" "Created ZFS dataset: $dataset_name"
                     
-                    # Copy data using rsync
+                    # Copy data using rsync with checksum verification and progress reporting
                     log_message "INFO" "Copying data to new dataset..."
-                    if rsync -a "${full_source_path}/${normalized_base_entry}_temp/" "${full_source_path}/${normalized_base_entry}/"; then
+                    # --checksum: verify data integrity using checksums (slower but safer)
+                    # --info=progress2: show overall progress (works well with logging)
+                    # -a: archive mode (preserve permissions, timestamps, etc.)
+                    if rsync -a --checksum --info=progress2 "${full_source_path}/${normalized_base_entry}_temp/" "${full_source_path}/${normalized_base_entry}/" 2>&1 | tee -a "$LOG_FILE"; then
                         local rsync_exit_status=$?
                         
                         # Validate copy if cleanup is enabled
@@ -751,8 +797,39 @@ print_conversion_summary() {
     fi
 }
 
-#----------------------------------------------------------------------------------    
-# Check if there's any work to do and validate sources
+#######################################
+# Validate source datasets and check for conversion work
+#
+# Verifies that all configured source datasets are valid ZFS datasets
+# and determines how many directories need conversion. Exits the script
+# if no sources are configured or no conversion work is needed.
+#
+# Performs validation:
+# - Checks if source paths exist
+# - Verifies sources are actual ZFS datasets
+# - Counts directories that aren't yet datasets
+# - Provides summary of conversion work needed
+#
+# Globals:
+#   SOURCE_POOL - Primary ZFS pool
+#   SOURCE_DATASET - Primary dataset
+#   SOURCE_POOL_APPDATA - Appdata pool (if containers enabled)
+#   SOURCE_DATASET_APPDATA - Appdata dataset (if containers enabled)
+#   SOURCE_POOL_VMS - VM pool (if VMs enabled)
+#   SOURCE_DATASET_VMS - VM dataset (if VMs enabled)
+#   SOURCE_DATASETS_ARRAY - Additional user-defined datasets
+#   SHOULD_PROCESS_CONTAINERS - Whether to include appdata
+#   SHOULD_PROCESS_VMS - Whether to include VM storage
+#   MOUNT_POINT - Base mount point
+# Arguments:
+#   None
+# Returns:
+#   0 if work needs to be done
+#   Exits with code 0 if no work needed
+#   Exits with code 1 if validation fails
+# Outputs:
+#   Log messages and summary via log_message
+#######################################
 validate_sources_and_work() {
     log_message "INFO" "Validating sources and checking for conversion work..."
     

@@ -51,10 +51,13 @@ SHOULD_PROCESS_CONTAINERS="no"            # Set to "yes" to process Docker appda
 SOURCE_POOL_APPDATA="tank"                # ZFS pool containing Docker appdata
 SOURCE_DATASET_APPDATA="appdata"          # Dataset name for Docker appdata
 
-# Virtual Machine Processing  
+# Virtual Machine Processing
 SHOULD_PROCESS_VMS="no"                   # Set to "yes" to process VM vdisks
 SOURCE_POOL_VMS="tank"                    # ZFS pool containing VM domains
 SOURCE_DATASET_VMS="domains"              # Dataset name for VM domains
+# VM shutdown timeout: 90 seconds provides enough time for graceful OS shutdown
+# while preventing indefinite waits. Typical OS shutdown: 30-60s. Allows buffer
+# for slow services. Adjust higher for systems with many services or slow storage.
 VM_FORCE_SHUTDOWN_WAIT="90"               # Seconds to wait before force stopping VM
 
 # Additional User-Defined Datasets
@@ -67,6 +70,13 @@ SOURCE_DATASETS_ARRAY=(
 # Dataset Converter Options
 CLEANUP_TEMP_DIRS="yes"                   # Remove temporary directories after successful conversion
 REPLACE_SPACES="no"                       # Replace spaces in dataset names with underscores
+# Buffer zone: 11% extra space requirement provides safety margin for:
+# - ZFS metadata overhead (~1-2%)
+# - Temporary snapshot/clone overhead (~3-5%)
+# - File system metadata growth (~2-3%)
+# - Safety buffer for unexpected growth (~3-5%)
+# Total ~11% ensures conversion completes without running out of space.
+# Reduce to 5% for space-constrained systems (higher risk).
 BUFFER_ZONE=11                           # Percentage of extra space required before conversion
 
 # ---------------------------------------
@@ -106,6 +116,11 @@ RSYNC_TYPE="incremental"                  # "incremental" or "mirror"
 DESTINATION_REMOTE="no"                   # "yes" for remote replication, "no" for local
 REMOTE_USER="root"                        # Username for remote server
 REMOTE_SERVER="192.168.1.100"            # Remote server hostname or IP
+# SSH Host Key Fingerprint for security (optional but recommended)
+# Get fingerprint with: ssh-keyscan -H SERVER | ssh-keygen -lf -
+# Example: "SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yzab5678"
+# Leave empty to skip verification (less secure)
+REMOTE_SSH_FINGERPRINT=""                 # SSH host key fingerprint for REMOTE_SERVER
 
 # ---------------------------------------
 # SCHEDULING SETTINGS
@@ -130,9 +145,16 @@ GOTIFY_SERVER_URL="http://localhost:8080"  # Your Gotify server URL (no trailing
 GOTIFY_APP_TOKEN=""                        # Your Gotify application token
 notification_type="all"                    # "all" for both success & failure, "error" for only failure, "none" for no notifications
 
-# Logging Configuration  
+# Logging Configuration
 LOG_FILE="/var/log/zfs-scripts.log"       # Path to log file
+# Log max size: 10M chosen to balance between:
+# - Sufficient history for troubleshooting (typical daily run ~100-500KB)
+# - Manageable file size for viewing/parsing
+# - Preventing runaway disk usage (~50M max with 5 rotations)
+# Increase to 50M for verbose logging or frequent runs.
 LOG_MAX_SIZE="10M"                         # Max log file size before rotation (e.g., 10M, 100K)
+# Log rotation count: 5 files preserves ~5-15 days of history (depending on activity)
+# while limiting disk usage to ~50MB. Increase for longer retention.
 LOG_MAX_FILES=5                            # Number of rotated log files to keep
 
 # ---------------------------------------
@@ -666,7 +688,7 @@ export SOURCE_DATASETS_ARRAY CLEANUP_TEMP_DIRS REPLACE_SPACES BUFFER_ZONE
 export SOURCE_POOL SOURCE_DATASET SOURCE_DATASET_AUTO_SELECT 
 export SOURCE_DATASET_AUTO_SELECT_EXCLUDE_PREFIX SOURCE_DATASET_AUTO_SELECT_EXCLUDES
 export AUTO_SNAPSHOTS SNAPSHOT_HOURS SNAPSHOT_DAYS SNAPSHOT_WEEKS SNAPSHOT_MONTHS SNAPSHOT_YEARS
-export DESTINATION_REMOTE REMOTE_USER REMOTE_SERVER REPLICATION
+export DESTINATION_REMOTE REMOTE_USER REMOTE_SERVER REMOTE_SSH_FINGERPRINT REPLICATION
 export DESTINATION_POOL PARENT_DESTINATION_DATASET SYNCOID_MODE
 export PARENT_DESTINATION_FOLDER RSYNC_TYPE
 export SANOID_CONFIG_DIR SANOID_BINARY SYNCOID_BINARY

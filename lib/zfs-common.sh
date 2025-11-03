@@ -108,6 +108,31 @@ rotate_log() {
 
     log_message "INFO" "Log file size ($file_size bytes) exceeds limit ($max_bytes bytes), rotating logs"
 
+    # Validate we can rotate the log
+    local log_dir=$(dirname "$LOG_FILE")
+
+    # Check if we have write permission to log directory
+    if [[ ! -w "$log_dir" ]]; then
+        echo "ERROR: No write permission to log directory: $log_dir" >&2
+        return 1
+    fi
+
+    # Check if we have write permission to log file
+    if [[ ! -w "$LOG_FILE" ]]; then
+        echo "ERROR: No write permission to log file: $LOG_FILE" >&2
+        return 1
+    fi
+
+    # Check available disk space (need at least 2x current log size)
+    local required_space=$((file_size * 2))
+    local available_space
+    available_space=$(df -B1 "$log_dir" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+
+    if [[ "$available_space" -lt "$required_space" ]]; then
+        echo "ERROR: Insufficient disk space for log rotation. Need: $required_space bytes, Available: $available_space bytes" >&2
+        return 1
+    fi
+
     # Rotate existing log files
     local max_files="${LOG_MAX_FILES:-5}"
     for ((i=max_files-1; i>=1; i--)); do
@@ -439,6 +464,57 @@ get_dataset_used_space() {
     fi
 }
 
+#######################################
+# Verify SSH host key fingerprint for secure remote connections
+# Globals:
+#   None
+# Arguments:
+#   $1 - Server hostname or IP
+#   $2 - Expected fingerprint (e.g., "SHA256:...")
+# Returns:
+#   0 if fingerprint matches or verification skipped (empty expected)
+#   1 on mismatch or error
+# Outputs:
+#   Error messages to stderr
+#######################################
+verify_ssh_fingerprint() {
+    local server="$1"
+    local expected_fingerprint="$2"
+
+    # Skip verification if no fingerprint provided
+    if [[ -z "$expected_fingerprint" ]]; then
+        return 0
+    fi
+
+    # Check if ssh-keyscan and ssh-keygen are available
+    if ! command -v ssh-keyscan >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+        echo "WARNING: ssh-keyscan or ssh-keygen not available, skipping fingerprint verification" >&2
+        return 0
+    fi
+
+    # Get actual fingerprint
+    local actual_fingerprint
+    actual_fingerprint=$(ssh-keyscan -H "$server" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -n1)
+
+    if [[ -z "$actual_fingerprint" ]]; then
+        echo "ERROR: Failed to retrieve SSH fingerprint from $server" >&2
+        echo "  Check that the server is reachable and SSH is running on port 22" >&2
+        return 1
+    fi
+
+    if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
+        echo "ERROR: SSH host key fingerprint mismatch for $server" >&2
+        echo "  Expected: $expected_fingerprint" >&2
+        echo "  Actual:   $actual_fingerprint" >&2
+        echo "  This could indicate a man-in-the-middle attack or server reinstallation" >&2
+        echo "  Update REMOTE_SSH_FINGERPRINT in config if server was legitimately changed" >&2
+        return 1
+    fi
+
+    log_message "INFO" "SSH host key fingerprint verified for $server"
+    return 0
+}
+
 # Export common functions for use by sourcing scripts
 export -f log_message
 export -f rotate_log
@@ -452,3 +528,4 @@ export -f require_root
 export -f ensure_directory
 export -f get_dataset_available_space
 export -f get_dataset_used_space
+export -f verify_ssh_fingerprint
