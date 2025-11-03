@@ -1,8 +1,32 @@
 #!/bin/bash
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # #   Shared configuration file for ZFS management scripts                                                                              # #
-# #   Source this file in both zfs-auto-datasets.sh and zfs-replications.sh                                                          # # 
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# #   Source this file in both zfs-auto-datasets.sh and zfs-replications.sh                                                          # #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+# ---------------------------------------
+# LIBRARY DEPENDENCIES
+# ---------------------------------------
+
+# Get the directory where this config file is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source validation library
+if [[ -f "$SCRIPT_DIR/lib/zfs-validation.sh" ]]; then
+    source "$SCRIPT_DIR/lib/zfs-validation.sh"
+else
+    echo "WARNING: Cannot find lib/zfs-validation.sh - validation will be limited" >&2
+    # Define minimal fallback validation to prevent script failure
+    validate_dataset_name() { [[ -n "$1" ]]; }
+    validate_path() { [[ -n "$1" ]]; }
+    validate_positive_integer() { [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]; }
+    validate_non_negative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    validate_integer_range() { validate_non_negative_integer "$1" && [[ "$1" -ge "$2" ]] && [[ "$1" -le "$3" ]]; }
+    validate_url() { [[ "$1" =~ ^https?:// ]]; }
+    validate_host() { [[ -n "$1" ]]; }
+    validate_boolean() { [[ "$1" == "yes" || "$1" == "no" ]]; }
+    validate_choice() { local v="$1"; shift 2; for c in "$@"; do [[ "$v" == "$c" ]] && return 0; done; return 1; }
+fi
 
 # ---------------------------------------
 # CORE ZFS SETTINGS
@@ -129,40 +153,289 @@ stopped_containers=()
 stopped_vms=()
 converted_folders=()
 
-# Function to validate configuration
+#######################################
+# Validate configuration
+#
+# Performs comprehensive validation of all configuration values using
+# the validation library. Checks include:
+# - Dataset name format validation
+# - Path validation with traversal protection
+# - Integer range validation
+# - URL and host validation
+# - Boolean value validation
+# - Choice validation
+#
+# Globals:
+#   All configuration variables
+# Arguments:
+#   None
+# Returns:
+#   0 if all valid, number of errors otherwise
+# Outputs:
+#   Error messages to stderr for each validation failure
+#######################################
 validate_config() {
     local errors=0
-    
-    # Check required Gotify settings if notifications enabled
+
+    echo "Validating ZFS configuration..." >&2
+
+    # ---------------------------------------
+    # Core Settings Validation
+    # ---------------------------------------
+
+    # Validate pool and dataset names
+    if ! validate_dataset_name "$SOURCE_POOL" 2>/dev/null; then
+        echo "ERROR: Invalid SOURCE_POOL: $SOURCE_POOL" >&2
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_dataset_name "$SOURCE_DATASET" 2>/dev/null; then
+        echo "ERROR: Invalid SOURCE_DATASET: $SOURCE_DATASET" >&2
+        errors=$((errors + 1))
+    fi
+
+    # Validate paths
+    if ! validate_path "$MOUNT_POINT" 2>/dev/null; then
+        echo "ERROR: Invalid MOUNT_POINT: $MOUNT_POINT" >&2
+        errors=$((errors + 1))
+    fi
+
+    # Check mount point exists
+    if [[ ! -d "$MOUNT_POINT" ]]; then
+        echo "ERROR: Mount point does not exist: $MOUNT_POINT" >&2
+        errors=$((errors + 1))
+    fi
+
+    # Validate DRY_RUN setting
+    if ! validate_boolean "$DRY_RUN" "DRY_RUN" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # ---------------------------------------
+    # Container Processing Validation
+    # ---------------------------------------
+
+    if ! validate_boolean "$SHOULD_PROCESS_CONTAINERS" "SHOULD_PROCESS_CONTAINERS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if [[ "$SHOULD_PROCESS_CONTAINERS" == "yes" ]]; then
+        if ! validate_dataset_name "$SOURCE_POOL_APPDATA" 2>/dev/null; then
+            echo "ERROR: Invalid SOURCE_POOL_APPDATA: $SOURCE_POOL_APPDATA" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_dataset_name "$SOURCE_DATASET_APPDATA" 2>/dev/null; then
+            echo "ERROR: Invalid SOURCE_DATASET_APPDATA: $SOURCE_DATASET_APPDATA" >&2
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # ---------------------------------------
+    # VM Processing Validation
+    # ---------------------------------------
+
+    if ! validate_boolean "$SHOULD_PROCESS_VMS" "SHOULD_PROCESS_VMS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if [[ "$SHOULD_PROCESS_VMS" == "yes" ]]; then
+        if ! validate_dataset_name "$SOURCE_POOL_VMS" 2>/dev/null; then
+            echo "ERROR: Invalid SOURCE_POOL_VMS: $SOURCE_POOL_VMS" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_dataset_name "$SOURCE_DATASET_VMS" 2>/dev/null; then
+            echo "ERROR: Invalid SOURCE_DATASET_VMS: $SOURCE_DATASET_VMS" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_positive_integer "$VM_FORCE_SHUTDOWN_WAIT" "VM_FORCE_SHUTDOWN_WAIT" 2>/dev/null; then
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # ---------------------------------------
+    # Dataset Array Validation
+    # ---------------------------------------
+
+    for dataset in "${SOURCE_DATASETS_ARRAY[@]}"; do
+        if [[ -n "$dataset" ]]; then
+            if ! validate_dataset_name "$dataset" 2>/dev/null; then
+                echo "ERROR: Invalid dataset in SOURCE_DATASETS_ARRAY: $dataset" >&2
+                errors=$((errors + 1))
+            fi
+        fi
+    done
+
+    # ---------------------------------------
+    # Dataset Converter Options Validation
+    # ---------------------------------------
+
+    if ! validate_boolean "$CLEANUP_TEMP_DIRS" "CLEANUP_TEMP_DIRS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_boolean "$REPLACE_SPACES" "REPLACE_SPACES" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_integer_range "$BUFFER_ZONE" "0" "100" "BUFFER_ZONE" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # ---------------------------------------
+    # Snapshot Settings Validation
+    # ---------------------------------------
+
+    if ! validate_boolean "$SOURCE_DATASET_AUTO_SELECT" "SOURCE_DATASET_AUTO_SELECT" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_boolean "$AUTO_SNAPSHOTS" "AUTO_SNAPSHOTS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_non_negative_integer "$SNAPSHOT_HOURS" "SNAPSHOT_HOURS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_non_negative_integer "$SNAPSHOT_DAYS" "SNAPSHOT_DAYS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_non_negative_integer "$SNAPSHOT_WEEKS" "SNAPSHOT_WEEKS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_non_negative_integer "$SNAPSHOT_MONTHS" "SNAPSHOT_MONTHS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if ! validate_non_negative_integer "$SNAPSHOT_YEARS" "SNAPSHOT_YEARS" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # ---------------------------------------
+    # Replication Settings Validation
+    # ---------------------------------------
+
+    if ! validate_choice "$REPLICATION" "REPLICATION" "zfs" "rsync" "none" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # ZFS replication settings
+    if [[ "$REPLICATION" == "zfs" ]]; then
+        if ! validate_dataset_name "$DESTINATION_POOL" 2>/dev/null; then
+            echo "ERROR: Invalid DESTINATION_POOL: $DESTINATION_POOL" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_dataset_name "$PARENT_DESTINATION_DATASET" 2>/dev/null; then
+            echo "ERROR: Invalid PARENT_DESTINATION_DATASET: $PARENT_DESTINATION_DATASET" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_choice "$SYNCOID_MODE" "SYNCOID_MODE" "strict-mirror" "basic" 2>/dev/null; then
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # Rsync replication settings
+    if [[ "$REPLICATION" == "rsync" ]]; then
+        if ! validate_path "$PARENT_DESTINATION_FOLDER" 2>/dev/null; then
+            echo "ERROR: Invalid PARENT_DESTINATION_FOLDER: $PARENT_DESTINATION_FOLDER" >&2
+            errors=$((errors + 1))
+        fi
+        if ! validate_choice "$RSYNC_TYPE" "RSYNC_TYPE" "incremental" "mirror" 2>/dev/null; then
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # Remote server validation
+    if ! validate_boolean "$DESTINATION_REMOTE" "DESTINATION_REMOTE" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
+        if [[ -z "$REMOTE_USER" ]]; then
+            echo "ERROR: REMOTE_USER must be set when remote destination is enabled" >&2
+            errors=$((errors + 1))
+        fi
+
+        if [[ -z "$REMOTE_SERVER" ]]; then
+            echo "ERROR: REMOTE_SERVER must be set when remote destination is enabled" >&2
+            errors=$((errors + 1))
+        elif ! validate_host "$REMOTE_SERVER" 2>/dev/null; then
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # ---------------------------------------
+    # Notification Settings Validation
+    # ---------------------------------------
+
+    if ! validate_choice "$notification_type" "notification_type" "all" "error" "none" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # Validate Gotify settings if notifications enabled
     if [[ "$notification_type" != "none" ]]; then
         if [[ -z "$GOTIFY_SERVER_URL" ]]; then
             echo "ERROR: GOTIFY_SERVER_URL must be set when notifications are enabled" >&2
             errors=$((errors + 1))
+        elif ! validate_url "$GOTIFY_SERVER_URL" 2>/dev/null; then
+            errors=$((errors + 1))
         fi
+
         if [[ -z "$GOTIFY_APP_TOKEN" ]]; then
             echo "ERROR: GOTIFY_APP_TOKEN must be set when notifications are enabled" >&2
             errors=$((errors + 1))
         fi
     fi
-    
+
+    # ---------------------------------------
+    # Logging Settings Validation
+    # ---------------------------------------
+
+    if ! validate_path "$LOG_FILE" 2>/dev/null; then
+        echo "ERROR: Invalid LOG_FILE path: $LOG_FILE" >&2
+        errors=$((errors + 1))
+    fi
+
     # Check log directory exists and is writable
     local log_dir
     log_dir=$(dirname "$LOG_FILE")
-    if [[ ! -d "$log_dir" ]]; then
-        echo "ERROR: Log directory $log_dir does not exist" >&2
+    if ! validate_path "$log_dir" 2>/dev/null; then
+        echo "ERROR: Invalid log directory path: $log_dir" >&2
+        errors=$((errors + 1))
+    elif [[ ! -d "$log_dir" ]]; then
+        echo "ERROR: Log directory does not exist: $log_dir" >&2
         errors=$((errors + 1))
     elif [[ ! -w "$log_dir" ]]; then
-        echo "ERROR: Log directory $log_dir is not writable" >&2
+        echo "ERROR: Log directory is not writable: $log_dir" >&2
         errors=$((errors + 1))
     fi
-    
-    # Check mount point exists
-    if [[ ! -d "$MOUNT_POINT" ]]; then
-        echo "ERROR: Mount point $MOUNT_POINT does not exist" >&2
+
+    # Validate LOG_MAX_FILES
+    if ! validate_positive_integer "$LOG_MAX_FILES" "LOG_MAX_FILES" 2>/dev/null; then
         errors=$((errors + 1))
     fi
-    
-    return $errors
+
+    # ---------------------------------------
+    # Scheduling Settings Validation
+    # ---------------------------------------
+
+    if ! validate_boolean "$ENABLE_SCHEDULING" "ENABLE_SCHEDULING" 2>/dev/null; then
+        errors=$((errors + 1))
+    fi
+
+    # ---------------------------------------
+    # Summary
+    # ---------------------------------------
+
+    if [[ $errors -gt 0 ]]; then
+        echo "ERROR: Configuration validation failed with $errors error(s)" >&2
+        return 1
+    else
+        echo "Configuration validation passed successfully" >&2
+        return 0
+    fi
 }
 
 # Function to setup cron jobs
