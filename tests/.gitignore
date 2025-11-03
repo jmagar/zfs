@@ -1,0 +1,32 @@
+# Test temporary files
+*.log
+*.tmp
+
+# BATS temporary directories
+/tmp/
+bats-*/
+
+# Test coverage reports
+coverage/
+*.coverage
+
+# Test results
+.test-results/
+test-results/
+
+# Mock command directories (created during tests)
+mocks/
+
+# Fixtures generated during tests
+fixtures/*.generated
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
