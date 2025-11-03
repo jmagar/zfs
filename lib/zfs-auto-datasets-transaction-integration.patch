@@ -1,0 +1,29 @@
+--- zfs-auto-datasets-ubuntu.sh.orig
++++ zfs-auto-datasets-ubuntu.sh
+@@ -488,6 +488,17 @@
+
+             log_message "INFO" "Creating dataset ${source_path}/${normalized_base_entry}..."
+
++            # Define paths for transaction
++            local dataset_name="${source_path}/${normalized_base_entry}"
++            local temp_path="${full_source_path}/${normalized_base_entry}_temp"
++
++            # Start transaction (if transaction library available)
++            local tx_id=""
++            if declare -F transaction_start >/dev/null 2>&1; then
++                tx_id=$(transaction_start "convert" "$dataset_name" "$entry" "$temp_path")
++                [[ -n "$tx_id" ]] && log_message "INFO" "Started transaction: $tx_id"
++            fi
++
+             if [[ "$DRY_RUN" != "yes" ]]; then
+                 # Move original to temp location
+                 if ! mv "$entry" "${full_source_path}/${normalized_base_entry}_temp"; then
+@@ -634,6 +645,9 @@
+ # Check dependencies
+ pre_run_checks
+
++# Recover any partial conversions from previous runs
++recover_partial_conversions
++
+ # Validate configuration and sources
+ validate_sources_and_work
