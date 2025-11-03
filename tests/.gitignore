@@ -9,7 +9,23 @@ test_helper/bats-file/
 *.tmp
 tmp/
 temp/
+/tmp/
+bats-*/
 fixtures/temp/
+fixtures/*.generated
+
+# Test coverage and results
+coverage/
+*.coverage
+.test-results/
+test-results/
+
+# Mock command directories (created during tests)
+mocks/
+
+# OS specific
+.DS_Store
+Thumbs.db
 
 # IDE and editor files
 .vscode/
