@@ -21,6 +21,19 @@ The repository contains two main functional areas:
 - **Snapshot & Replication**: `zfs-replications-ubuntu.sh` - Handles snapshotting and replication
 - **Features**: Gotify notifications, file logging with rotation, Ubuntu-compatible paths
 
+### Shared Libraries (`lib/`)
+- **`lib/zfs-common.sh`** - Common functions: logging (`log_message`, `rotate_log`, `send_notification`), notifications, size parsing (`parse_size_to_bytes`, `format_bytes`), ZFS helpers (`is_zfs_dataset`, `get_dataset_for_path`), SSH fingerprint verification
+- **`lib/zfs-validation.sh`** - Input validation: path traversal checks (`validate_path`), URL format validation (`validate_url`), dataset name validation (`validate_dataset_name`)
+- **`lib/zfs-error-handling.sh`** - Error tracking: error counting, error log management, exit-trap cleanup (`cleanup_on_exit`)
+- **`lib/zfs-locking.sh`** - Concurrency: `flock`-based advisory locking with timeout (`acquire_lock`, `release_lock`) for multi-agent coordination
+- **`lib/zfs-transactions.sh`** - Transactional dataset operations: state tracking, atomic rollback, forward recovery (`transaction_start`, `transaction_rollback`, `transaction_complete`)
+
+### Test Suite (`tests/`)
+- Unit tests (`tests/test-*.bats`) using [BATS](https://github.com/bats-core/bats-core)
+- Integration tests (`tests/integration/`)
+- Test helpers in `tests/test_helper/`
+- Run with: `bats tests/test-*.bats` (requires `sudo apt install bats`)
+
 ### Original Unraid Scripts (Legacy)
 - **Auto Dataset Converter**: `zfs-auto-datasets.sh` - Original Unraid version
 - **Snapshot Replication**: `zfs-dataset-replications.sh` - Original Unraid version

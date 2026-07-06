@@ -1,12 +1,10 @@
 #!/usr/bin/env bats
 # Security Tests for Stream 1 - Command Injection and Path Traversal Fixes
 #
-# This test file validates all security fixes implemented in Stream 1:
+# This test file validates all security fixes:
 # - Task 1.1: Command injection in grep patterns
 # - Task 1.2: Unsafe path operations
 # - Task 1.3: Cron job manipulation vulnerabilities
-#
-# For full implementation details, see STREAM_1_SECURITY_REPORT.md
 
 @test "test framework is operational" {
     [ 1 -eq 1 ]

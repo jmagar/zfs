@@ -461,8 +461,11 @@ transaction_get_info() {
             # Still limited — does not handle escaped quotes in values. jq strongly recommended.
             echo "$state_content" | awk -v key="\"$field\"" '
                 index($0, key) {
-                    # Extract everything after the colon, trim whitespace/quotes
+                    # Extract everything after the colon, trim whitespace
                     sub(/^[^:]*:[ \t]*/, "")
+                    # Strip trailing comma (non-final fields have one)
+                    sub(/,$/, "")
+                    # Strip surrounding quotes
                     gsub(/^"|"$/, "")
                     print
                 }'
@@ -612,6 +615,13 @@ transaction_rollback() {
             fi
 
             if [[ "$dry_run" != "yes" ]]; then
+                # Verify the source path exists before declaring success
+                if [[ ! -e "$source_path" ]]; then
+                    if declare -F log_message >/dev/null 2>&1; then
+                        log_message "ERROR" "VALIDATED state but source path missing: $source_path — manual recovery required"
+                    fi
+                    rollback_success=false
+                fi
                 # Remove temp directory
                 if [[ -d "$temp_path" ]]; then
                     if rm -rf "$temp_path" 2>/dev/null; then

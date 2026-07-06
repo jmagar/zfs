@@ -161,8 +161,8 @@ acquire_lock() {
             return 1
         fi
 
-        # Wait a bit before retry
-        sleep 0.1
+        # Wait a bit before retry (with jitter to avoid thundering herd)
+        sleep 0.$(( RANDOM % 10 + 5 ))
     done
 }
 

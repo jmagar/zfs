@@ -33,13 +33,20 @@ error() {
     ZFS_LAST_ERROR="$message"
 
     # Ensure error log directory exists
-    local error_log_dir=$(dirname "$ZFS_ERROR_LOG")
+    local error_log_dir
+    error_log_dir=$(dirname "$ZFS_ERROR_LOG")
     if [[ ! -d "$error_log_dir" ]]; then
-        mkdir -p "$error_log_dir" 2>/dev/null || true
+        if ! mkdir -p "$error_log_dir" 2>/dev/null; then
+            # Can't create dir — fall back to stderr only
+            echo "[$timestamp] [ERROR $code] $message (warning: could not create log dir $error_log_dir)" >&2
+            return "$code"
+        fi
     fi
 
-    # Log to error log file
-    echo "[$timestamp] [ERROR $code] $message" >> "$ZFS_ERROR_LOG" 2>/dev/null || true
+    # Log to error log file (check writability to avoid silent failures)
+    if ! echo "[$timestamp] [ERROR $code] $message" >> "$ZFS_ERROR_LOG" 2>/dev/null; then
+        echo "[$timestamp] [ERROR $code] $message (warning: could not write to $ZFS_ERROR_LOG)" >&2
+    fi
 
     # Also log via standard logging if available
     if declare -F log_message >/dev/null 2>&1; then
@@ -357,7 +364,8 @@ export -f get_error_count
 export -f get_last_error
 
 # Set up exit trap (skip in test environments)
-# BATS sets BATS_VERSION when running tests
+# BATS sets BATS_VERSION when running tests — skipping the trap there avoids
+# interfering with the BATS test runner's own EXIT trap and cleanup logic.
 if [[ -z "${BATS_VERSION:-}" ]]; then
     trap cleanup_on_exit EXIT
 fi

@@ -125,8 +125,8 @@ validate_path() {
         return 1
     fi
 
-    # Check for path traversal attempts
-    if [[ "$path" =~ \.\. ]]; then
+    # Check for path traversal attempts (../ or /.. but not file..txt)
+    if [[ "$path" =~ (\.\./|/\.\.) ]]; then
         echo "ERROR: Path contains parent directory reference (..): $path" >&2
         return 1
     fi
@@ -296,8 +296,10 @@ validate_url() {
     fi
 
     # Basic URL validation: protocol://host[:port][/path]
-    # RFC 3986 compliant hostname pattern with optional port and path
-    if [[ ! "$url" =~ ^https?://[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?(/.*)?$ ]]; then
+    # Accepts hostnames and IPv4 addresses, with optional port and path
+    local ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
+    local hostname='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*'
+    if [[ ! "$url" =~ ^https?://($hostname|$ipv4)(:[0-9]{1,5})?(/.*)?$ ]]; then
         echo "ERROR: Invalid URL format: $url" >&2
         return 1
     fi

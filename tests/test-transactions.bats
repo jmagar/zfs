@@ -25,6 +25,12 @@ setup() {
     # Source the transaction library
     export SCRIPT_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     source "$SCRIPT_DIR/lib/zfs-transactions.sh"
+
+    # Stub validate_dataset_name so transaction_start doesn't abort in tests
+    if ! declare -F validate_dataset_name >/dev/null 2>&1; then
+        validate_dataset_name() { return 0; }
+        export -f validate_dataset_name
+    fi
 }
 
 # Teardown function run after each test

@@ -51,6 +51,10 @@ jobs:
 
       - name: Setup test environment
         run: |
+          if [[ ! -f tests/setup.sh ]]; then
+            echo "tests/setup.sh not found — skipping test environment setup"
+            exit 0
+          fi
           chmod +x tests/setup.sh
           ./tests/setup.sh
 

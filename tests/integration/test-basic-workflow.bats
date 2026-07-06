@@ -80,8 +80,6 @@ teardown_file() {
 #######################################
 
 @test "integration: dataset converter dry-run does not require root" {
-    skip_if_not_root "Dry-run test requires root to verify it works"
-
     export DRY_RUN="yes"
 
     # This should work in dry-run mode even without ZFS
@@ -93,8 +91,6 @@ teardown_file() {
 }
 
 @test "integration: replication dry-run does not require root" {
-    skip_if_not_root "Dry-run test requires root to verify it works"
-
     export DRY_RUN="yes"
 
     # This should work in dry-run mode even without ZFS

@@ -328,6 +328,12 @@ format_bytes() {
         return
     fi
 
+    # Guard against values that would overflow bash arithmetic (signed 64-bit max)
+    local max_bytes=9223372036854775807
+    if (( bytes > max_bytes )); then
+        bytes=$max_bytes
+    fi
+
     local units=("B" "K" "M" "G" "T" "P")
     local unit=0
     local size=$bytes
@@ -540,9 +546,9 @@ verify_ssh_fingerprint() {
         return 0
     fi
 
-    # Get actual fingerprint (use -p for non-standard ports)
+    # Get actual fingerprint (use -p for non-standard ports, -t to limit key types)
     local actual_fingerprint
-    actual_fingerprint=$(ssh-keyscan -p "$port" -H "$server" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -n1)
+    actual_fingerprint=$(ssh-keyscan -p "$port" -t rsa,ed25519 -H "$server" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -n1)
 
     if [[ -z "$actual_fingerprint" ]]; then
         echo "ERROR: Failed to retrieve SSH fingerprint from $server:$port" >&2

@@ -292,21 +292,25 @@ For a build to pass:
 ### Common Helpers (test_helper/common.bash)
 
 #### File Operations
+
 - `create_test_dir(name)`: Create temporary test directory
 - `create_test_file(name, content)`: Create temporary test file
 - `generate_test_data(dir, num_files, size_kb)`: Generate random test files
 
 #### Command Mocking
+
 - `mock_command(name, script)`: Create mock command
 - `unmock_command(name)`: Remove mock command
 
 #### Conditional Execution
+
 - `skip_if_missing(cmd)`: Skip if command not available
 - `skip_if_not_root()`: Skip if not running as root
 - `skip_if_ci()`: Skip in CI environment
 - `is_ci()`: Check if running in CI
 
 #### Assertions
+
 - `assert_log_contains(pattern, file)`: Check log contains pattern
 - `assert_log_not_contains(pattern, file)`: Check log doesn't contain pattern
 - `count_log_pattern(pattern, file)`: Count pattern occurrences
@@ -314,11 +318,13 @@ For a build to pass:
 - `assert_line_count(file, count)`: Check file has exact line count
 
 #### ZFS Helpers
+
 - `has_zfs()`: Check if ZFS is available
 - `create_mock_zfs_pool(name, size)`: Create test ZFS pool
 - `destroy_mock_zfs_pool(name)`: Destroy test ZFS pool
 
 #### Utilities
+
 - `safe_source(path)`: Source library file safely
 - `test_section(title)`: Print section header
 - `debug_var(name)`: Print variable value for debugging
