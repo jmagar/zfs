@@ -55,15 +55,7 @@ validate_dataset_name() {
         return 1
     fi
 
-    # Check basic format: must start with alphanumeric, can contain valid chars
-    # Valid chars: a-zA-Z0-9_:.-/ (slash only for hierarchy)
-    if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_:.-]*(\/[a-zA-Z0-9][a-zA-Z0-9_:.-]*)*$ ]]; then
-        echo "ERROR: Invalid dataset name format: $name" >&2
-        echo "Dataset names must start with alphanumeric, and contain only [a-zA-Z0-9_:.-/]" >&2
-        return 1
-    fi
-
-    # Check for consecutive slashes
+    # Check for consecutive slashes (before format check for specific error message)
     if [[ "$name" =~ // ]]; then
         echo "ERROR: Dataset name cannot contain consecutive slashes: $name" >&2
         return 1
@@ -75,7 +67,8 @@ validate_dataset_name() {
         return 1
     fi
 
-    # Check for ZFS reserved names in any component
+    # Check for ZFS reserved names in any component (before format check
+    # so .zfs is caught as "reserved word" not "invalid format")
     local IFS='/'
 # shellcheck disable=SC2206
         local -a components=($name)
@@ -87,6 +80,14 @@ validate_dataset_name() {
                 ;;
         esac
     done
+
+    # Check basic format: must start with alphanumeric, can contain valid chars
+    # Valid chars: a-zA-Z0-9_:.-/ (slash only for hierarchy)
+    if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_:.-]*(\/[a-zA-Z0-9][a-zA-Z0-9_:.-]*)*$ ]]; then
+        echo "ERROR: Invalid dataset name format: $name" >&2
+        echo "Dataset names must start with alphanumeric, and contain only [a-zA-Z0-9_:.-/]" >&2
+        return 1
+    fi
 
     # Check length (ZFS has a max path length)
     if [[ ${#name} -gt 255 ]]; then
@@ -132,8 +133,10 @@ validate_path() {
         return 1
     fi
 
-    # Check for null bytes
-    if [[ "$path" =~ $'\0' ]]; then
+    # Check for null bytes (bash can't hold null bytes, so this is belt-and-suspenders)
+    # Note: $'\0' produces an empty string in bash, so =~ would match everything.
+    # Using printf to detect embedded nulls (won't actually happen in bash vars).
+    if [[ "$(printf '%s' "$path" | tr -d '\0')" != "$path" ]]; then
         echo "ERROR: Path contains null byte" >&2
         return 1
     fi
@@ -296,6 +299,12 @@ validate_url() {
         return 1
     fi
 
+    # Check for spaces (before format check for specific error message)
+    if [[ "$url" =~ [[:space:]] ]]; then
+        echo "ERROR: URL contains spaces: $url" >&2
+        return 1
+    fi
+
     # Basic URL validation: protocol://host[:port][/path]
     # Accepts hostnames and IPv4 addresses, with optional port and path
     local ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
@@ -305,10 +314,14 @@ validate_url() {
         return 1
     fi
 
-    # Check for spaces
-    if [[ "$url" =~ [[:space:]] ]]; then
-        echo "ERROR: URL contains spaces: $url" >&2
-        return 1
+    # Validate port range (0-65535) if a port is present
+    local port
+    if [[ "$url" =~ :([0-9]{1,5})(/|$) ]]; then
+        port="${BASH_REMATCH[1]}"
+        if (( port > 65535 )); then
+            echo "ERROR: Invalid port number: $port (must be 0-65535)" >&2
+            return 1
+        fi
     fi
 
     # Check for path traversal in URL path
@@ -364,12 +377,12 @@ validate_host() {
     # - Labels must start and end with alphanumeric
     # - Labels can be 1-63 characters
     # - Total hostname up to 253 characters
+    # Check total length before regex (long labels fail regex, not length check)
+    if [[ ${#host} -gt 253 ]]; then
+        echo "ERROR: Hostname too long (max 253 characters): ${#host} chars" >&2
+        return 1
+    fi
     if [[ "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-        # Check total length
-        if [[ ${#host} -gt 253 ]]; then
-            echo "ERROR: Hostname too long (max 253 characters): $host" >&2
-            return 1
-        fi
         return 0
     fi
 
@@ -462,9 +475,9 @@ validate_snapshot_name() {
         return 1
     fi
 
-    # Check format: dataset@snapshot
-    if [[ ! "$snapshot" =~ ^(.+)@([^@]+)$ ]]; then
-        echo "ERROR: Invalid snapshot format, expected dataset@snapshot: $snapshot" >&2
+    # Check format: dataset@snapshot (exactly one @, no @ in dataset part)
+    if [[ ! "$snapshot" =~ ^([^@]+)@([^@]+)$ ]]; then
+        echo "ERROR: Invalid snapshot name format, expected dataset@snapshot: $snapshot" >&2
         return 1
     fi
 
