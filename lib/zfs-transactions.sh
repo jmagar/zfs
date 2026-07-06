@@ -282,9 +282,9 @@ EOF
     # Release lock
     _tx_release_lock "$tx_id" "$lock_fd"
 
-    # Log transaction start
+    # Log transaction start (to stderr so stdout only carries the tx_id)
     if declare -F log_message >/dev/null 2>&1; then
-        log_message "INFO" "Transaction started: $tx_id (operation: $operation, dataset: $dataset_name)"
+        log_message "INFO" "Transaction started: $tx_id (operation: $operation, dataset: $dataset_name)" >&2
     fi
 
     # Output transaction ID

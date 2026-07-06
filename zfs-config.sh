@@ -652,7 +652,8 @@ remove_cron_jobs() {
 
 # Function to show current cron schedule
 show_cron_schedule() {
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local dataset_script="$script_dir/zfs-auto-datasets-ubuntu.sh"
     local replication_script="$script_dir/zfs-replications-ubuntu.sh"
     

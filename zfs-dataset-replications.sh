@@ -496,12 +496,13 @@ run_for_each_dataset() {
     selected_source_datasets=("$source_dataset")
   else
     # Filter datasets based on exclusion rules if auto-selection is enabled
+    local excludes_str=" ${source_dataset_auto_select_excludes[*]} "
     if [[ -z "$source_dataset_auto_select_exclude_prefix" ]]; then
       # Select all datasets if no exclusion prefix is specified
       while IFS= read -r line; do
         # Extract dataset name
         dataset_name=$(echo "$line" | awk -F'/' '{print $NF}')
-        if [[ ! " ${source_dataset_auto_select_excludes[@]} " =~ " ${dataset_name} " ]]; then
+        if [[ "$excludes_str" != *" $dataset_name "* ]]; then
           # Add dataset to the list if not excluded
           selected_source_datasets+=("$line")
         else
@@ -514,7 +515,7 @@ run_for_each_dataset() {
       while IFS= read -r line; do
         # Extract dataset name
         dataset_name=$(echo "$line" | awk -F'/' '{print $NF}')
-        if [[ ! " ${source_dataset_auto_select_excludes[@]} " =~ " ${dataset_name} " ]]; then
+        if [[ "$excludes_str" != *" $dataset_name "* ]]; then
           # Add dataset to the list if not excluded
           selected_source_datasets+=("$line")
       else

@@ -23,8 +23,8 @@ setup() {
     export SCRIPT_DIR="${BATS_TEST_DIRNAME%/*}"
     source "$SCRIPT_DIR/lib/zfs-common.sh"
 
-    # Reset log file for each test
-    rm -f "$LOG_FILE"
+    # Reset log file and any rotated copies for each test
+    rm -f "$LOG_FILE" "${LOG_FILE}".* 2>/dev/null
     touch "$LOG_FILE"
 }
 
@@ -113,7 +113,7 @@ teardown() {
 
     # Create large current log (avoid yes|head — SIGPIPE under pipefail)
     local i
-    for i in $(seq 1 100); do echo "test"; done > "$LOG_FILE"
+    for i in $(seq 1 300); do echo "test line for rotation testing"; done > "$LOG_FILE"
 
     rotate_log
 

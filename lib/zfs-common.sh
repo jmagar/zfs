@@ -306,7 +306,7 @@ normalize_name() {
 
     normalized_name=$(echo "$original_name" |
                      sed 's/ä/ae/g; s/ö/oe/g; s/ü/ue/g;
-                          s/Ä/Ae/g; s/Ö/Oe/g; s/Ü/Ue/g;
+                          s/Ä/AE/g; s/Ö/OE/g; s/Ü/UE/g;
                           s/ß/ss/g')
 
     echo "$normalized_name"
