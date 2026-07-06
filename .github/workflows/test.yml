@@ -13,6 +13,10 @@ on:
       - develop
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: write
+
 env:
   DEBIAN_FRONTEND: noninteractive
 
