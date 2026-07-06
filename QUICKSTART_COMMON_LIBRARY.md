@@ -194,15 +194,14 @@ curl -X POST "$GOTIFY_SERVER_URL/message" \
 
 ## Next Steps
 
-- Read `/home/user/zfs/lib/README.md` for complete documentation
-- Review `/home/user/zfs/STREAM_4_REPORT.md` for implementation details
-- Check `/home/user/zfs/tests/test-common.bats` for usage examples
+- Read `lib/README.md` for complete documentation
+- Review `STREAM_4_REPORT.md` for implementation details
+- Check `tests/test-common.bats` for usage examples
 
 ## Quick Test
 
 Run the manual test suite:
 ```bash
-cd /home/user/zfs
 ./tests/manual-test-common.sh
 ```
 

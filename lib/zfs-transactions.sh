@@ -247,7 +247,15 @@ transaction_start() {
     lock_fd=$(_tx_acquire_lock "$tx_id") || return 1
 
     # Create transaction state
-    local timestamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
+    # Use %3N (milliseconds) on GNU date; fall back to seconds-only ISO 8601 on BSD/macOS
+    local timestamp
+    local ts_test
+    ts_test=$(date -u '+%3N' 2>/dev/null)
+    if [[ -n "$ts_test" && "$ts_test" != "%3N" ]]; then
+        timestamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
+    else
+        timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    fi
     local state_content=$(cat <<EOF
 {
   "transaction_id": "$tx_id",
@@ -449,8 +457,15 @@ transaction_get_info() {
         if command -v jq >/dev/null 2>&1; then
             echo "$state_content" | jq -r ".$field"
         else
-            # Fallback: grep and sed
-            echo "$state_content" | grep "\"$field\"" | sed 's/.*: "\([^"]*\)".*/\1/'
+            # Fallback: awk-based extraction (more robust than grep+sed for quoted values)
+            # Still limited — does not handle escaped quotes in values. jq strongly recommended.
+            echo "$state_content" | awk -v key="\"$field\"" '
+                index($0, key) {
+                    # Extract everything after the colon, trim whitespace/quotes
+                    sub(/^[^:]*:[ \t]*/, "")
+                    gsub(/^"|"$/, "")
+                    print
+                }'
         fi
     fi
 
@@ -546,15 +561,26 @@ transaction_rollback() {
             if [[ "$dry_run" != "yes" ]]; then
                 # Check if dataset exists
                 if zfs list -H "$dataset_name" &>/dev/null; then
-                    if zfs destroy -r "$dataset_name" 2>/dev/null; then
+                    # Check for child datasets before destroying — never use -r
+                    # which would recursively destroy children (data loss risk)
+                    local child_count
+                    child_count=$(zfs list -r -H -o name "$dataset_name" 2>/dev/null | tail -n +2 | wc -l)
+                    if [[ "$child_count" -gt 0 ]]; then
                         if declare -F log_message >/dev/null 2>&1; then
-                            log_message "SUCCESS" "Destroyed dataset: $dataset_name"
-                        fi
-                    else
-                        if declare -F log_message >/dev/null 2>&1; then
-                            log_message "ERROR" "Failed to destroy dataset: $dataset_name"
+                            log_message "ERROR" "Cannot safely destroy $dataset_name: has $child_count child dataset(s). Manual cleanup required."
                         fi
                         rollback_success=false
+                    else
+                        if zfs destroy "$dataset_name" 2>/dev/null; then
+                            if declare -F log_message >/dev/null 2>&1; then
+                                log_message "SUCCESS" "Destroyed dataset: $dataset_name"
+                            fi
+                        else
+                            if declare -F log_message >/dev/null 2>&1; then
+                                log_message "ERROR" "Failed to destroy dataset: $dataset_name"
+                            fi
+                            rollback_success=false
+                        fi
                     fi
                 fi
 

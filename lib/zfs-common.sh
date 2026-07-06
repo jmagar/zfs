@@ -351,13 +351,31 @@ format_bytes() {
 parse_size_to_bytes() {
     local size_str="$1"
 
+    # Extract the numeric prefix and validate it
+    local num
     case "$size_str" in
-        *B|*b) echo "${size_str%[Bb]}" ;;
-        *K|*k) echo "$((${size_str%[Kk]} * 1024))" ;;
-        *M|*m) echo "$((${size_str%[Mm]} * 1024 * 1024))" ;;
-        *G|*g) echo "$((${size_str%[Gg]} * 1024 * 1024 * 1024))" ;;
-        *T|*t) echo "$((${size_str%[Tt]} * 1024 * 1024 * 1024 * 1024))" ;;
-        *) echo "$size_str" ;;
+        *B|*b) num="${size_str%[Bb]}" ;;
+        *K|*k) num="${size_str%[Kk]}" ;;
+        *M|*m) num="${size_str%[Mm]}" ;;
+        *G|*g) num="${size_str%[Gg]}" ;;
+        *T|*t) num="${size_str%[Tt]}" ;;
+        *) num="$size_str" ;;
+    esac
+
+    # Validate that num is a non-negative integer
+    if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Invalid size string '$size_str'" >&2
+        echo 0
+        return 1
+    fi
+
+    case "$size_str" in
+        *B|*b) echo "$num" ;;
+        *K|*k) echo "$((num * 1024))" ;;
+        *M|*m) echo "$((num * 1024 * 1024))" ;;
+        *G|*g) echo "$((num * 1024 * 1024 * 1024))" ;;
+        *T|*t) echo "$((num * 1024 * 1024 * 1024 * 1024))" ;;
+        *) echo "$num" ;;
     esac
 }
 
@@ -485,8 +503,9 @@ get_dataset_used_space() {
 # Globals:
 #   None
 # Arguments:
-#   $1 - Server hostname or IP
+#   $1 - Server hostname or IP (may include port, e.g. "host:2222")
 #   $2 - Expected fingerprint (e.g., "SHA256:...")
+#   $3 - SSH port (optional, default 22; overridden by host:port in $1)
 # Returns:
 #   0 if fingerprint matches or verification skipped (empty expected)
 #   1 on mismatch or error
@@ -496,10 +515,23 @@ get_dataset_used_space() {
 verify_ssh_fingerprint() {
     local server="$1"
     local expected_fingerprint="$2"
+    local port="${3:-22}"
+
+    # Extract port from server if specified as host:port
+    if [[ "$server" == *:* ]]; then
+        port="${server##*:}"
+        server="${server%:*}"
+    fi
 
     # Skip verification if no fingerprint provided
     if [[ -z "$expected_fingerprint" ]]; then
         return 0
+    fi
+
+    # Validate expected fingerprint format
+    if [[ "$expected_fingerprint" != SHA256:* && "$expected_fingerprint" != MD5:* ]]; then
+        echo "ERROR: Invalid fingerprint format '$expected_fingerprint' (expected SHA256:... or MD5:...)" >&2
+        return 1
     fi
 
     # Check if ssh-keyscan and ssh-keygen are available
@@ -508,18 +540,18 @@ verify_ssh_fingerprint() {
         return 0
     fi
 
-    # Get actual fingerprint
+    # Get actual fingerprint (use -p for non-standard ports)
     local actual_fingerprint
-    actual_fingerprint=$(ssh-keyscan -H "$server" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -n1)
+    actual_fingerprint=$(ssh-keyscan -p "$port" -H "$server" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -n1)
 
     if [[ -z "$actual_fingerprint" ]]; then
-        echo "ERROR: Failed to retrieve SSH fingerprint from $server" >&2
-        echo "  Check that the server is reachable and SSH is running on port 22" >&2
+        echo "ERROR: Failed to retrieve SSH fingerprint from $server:$port" >&2
+        echo "  Check that the server is reachable and SSH is running on port $port" >&2
         return 1
     fi
 
     if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
-        echo "ERROR: SSH host key fingerprint mismatch for $server" >&2
+        echo "ERROR: SSH host key fingerprint mismatch for $server:$port" >&2
         echo "  Expected: $expected_fingerprint" >&2
         echo "  Actual:   $actual_fingerprint" >&2
         echo "  This could indicate a man-in-the-middle attack or server reinstallation" >&2
@@ -527,7 +559,7 @@ verify_ssh_fingerprint() {
         return 1
     fi
 
-    log_message "INFO" "SSH host key fingerprint verified for $server"
+    log_message "INFO" "SSH host key fingerprint verified for $server:$port"
     return 0
 }
 

@@ -91,7 +91,11 @@ teardown() {
 
 @test "rotate_log rotates when file exceeds size limit" {
     # Create a log file larger than LOG_MAX_SIZE (1K)
-    yes "This is a test log line that will be repeated many times" | head -n 100 > "$LOG_FILE"
+    # Avoid yes|head which triggers SIGPIPE under pipefail in CI
+    local i
+    for i in $(seq 1 100); do
+        echo "This is a test log line that will be repeated many times"
+    done > "$LOG_FILE"
 
     rotate_log
 
@@ -107,8 +111,9 @@ teardown() {
     echo "log 1" > "${LOG_FILE}.1"
     echo "log 2" > "${LOG_FILE}.2"
 
-    # Create large current log
-    yes "test" | head -n 100 > "$LOG_FILE"
+    # Create large current log (avoid yes|head — SIGPIPE under pipefail)
+    local i
+    for i in $(seq 1 100); do echo "test"; done > "$LOG_FILE"
 
     rotate_log
 

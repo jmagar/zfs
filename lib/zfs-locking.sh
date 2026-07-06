@@ -15,6 +15,13 @@
 #   - Automatic cleanup on script exit
 #   - Prevents deadlocks with timeout mechanism
 #
+# Security Note:
+#   flock provides ADVISORY locking only — it coordinates cooperating
+#   processes (e.g. multiple instances of these scripts). A non-cooperating
+#   process or a determined attacker can bypass the lock entirely. Do NOT
+#   rely on this for security-critical mutual exclusion; it is designed for
+#   multi-agent coordination to prevent accidental concurrent operations.
+#
 # Functions provided:
 #   - acquire_lock: Acquire a lock with timeout
 #   - release_lock: Release a lock
