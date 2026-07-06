@@ -47,7 +47,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bats git curl jq
+          sudo apt-get install -y -qq git curl jq
+          # Install bats from source (newer version doesn't exit 1 on skipped tests)
+          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
+          sudo /tmp/bats/install.sh /usr/local
 
       - name: Setup test environment
         run: |
