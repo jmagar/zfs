@@ -27,7 +27,8 @@ declare -g ZFS_ERROR_LOG="${ZFS_ERROR_LOG:-/var/log/zfs-errors.log}"
 error() {
     local message="$1"
     local code="${2:-1}"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
     ZFS_ERROR_COUNT=$((ZFS_ERROR_COUNT + 1))
     ZFS_LAST_ERROR="$message"
@@ -260,7 +261,9 @@ require_directory() {
 #   0 if exists, 1 otherwise
 #######################################
 require_command() {
+# shellcheck disable=SC2178,SC2128
     local cmd="$1"
+# shellcheck disable=SC2128
 
     if [[ -z "$cmd" ]]; then
         error "require_command: command name cannot be empty"

@@ -77,7 +77,8 @@ validate_dataset_name() {
 
     # Check for ZFS reserved names in any component
     local IFS='/'
-    local -a components=($name)
+# shellcheck disable=SC2206
+        local -a components=($name)
     for component in "${components[@]}"; do
         case "$component" in
             ".zfs"|"snapshot"|"bookmark")
@@ -345,7 +346,8 @@ validate_host() {
     if [[ "$host" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
         # Validate each octet (0-255)
         local IFS='.'
-        local -a octets=($host)
+# shellcheck disable=SC2206
+                local -a octets=($host)
         for octet in "${octets[@]}"; do
             # Remove leading zeros for comparison
             local num=$((10#$octet))

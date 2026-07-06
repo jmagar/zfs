@@ -64,7 +64,8 @@ show_transaction_details() {
     echo ""
 
     # Get transaction info
-    local info=$(transaction_get_info "$tx_id")
+    local info
+    info=$(transaction_get_info "$tx_id")
 
     if [[ -z "$info" ]]; then
         print_error "Transaction not found: $tx_id"
@@ -79,10 +80,14 @@ show_transaction_details() {
     echo ""
 
     # Get specific fields for filesystem check
-    local state=$(transaction_get_info "$tx_id" "state")
-    local source_path=$(transaction_get_info "$tx_id" "source_path")
-    local temp_path=$(transaction_get_info "$tx_id" "temp_path")
-    local dataset_name=$(transaction_get_info "$tx_id" "dataset_name")
+    local state
+    state=$(transaction_get_info "$tx_id" "state")
+    local source_path
+    source_path=$(transaction_get_info "$tx_id" "source_path")
+    local temp_path
+    temp_path=$(transaction_get_info "$tx_id" "temp_path")
+    local dataset_name
+    dataset_name=$(transaction_get_info "$tx_id" "dataset_name")
 
     echo -e "${BLUE}Filesystem Status:${NC}"
     echo "===================="
@@ -91,8 +96,10 @@ show_transaction_details() {
     # Check source path
     echo "Source Path: $source_path"
     if [[ -d "$source_path" ]]; then
-        local size=$(du -sh "$source_path" 2>/dev/null | cut -f1)
-        local files=$(find "$source_path" -type f 2>/dev/null | wc -l)
+        local size
+        size=$(du -sh "$source_path" 2>/dev/null | cut -f1)
+        local files
+        files=$(find "$source_path" -type f 2>/dev/null | wc -l)
         echo -e "  ${GREEN}EXISTS${NC} - Size: $size, Files: $files"
     else
         echo -e "  ${RED}NOT FOUND${NC}"
@@ -102,8 +109,10 @@ show_transaction_details() {
     # Check temp path
     echo "Temp Path: $temp_path"
     if [[ -d "$temp_path" ]]; then
-        local size=$(du -sh "$temp_path" 2>/dev/null | cut -f1)
-        local files=$(find "$temp_path" -type f 2>/dev/null | wc -l)
+        local size
+        size=$(du -sh "$temp_path" 2>/dev/null | cut -f1)
+        local files
+        files=$(find "$temp_path" -type f 2>/dev/null | wc -l)
         echo -e "  ${YELLOW}EXISTS${NC} - Size: $size, Files: $files"
     else
         echo "  NOT FOUND"
@@ -113,8 +122,10 @@ show_transaction_details() {
     # Check dataset
     echo "Dataset: $dataset_name"
     if zfs list -H "$dataset_name" &>/dev/null; then
-        local used=$(zfs list -H -o used "$dataset_name")
-        local avail=$(zfs list -H -o avail "$dataset_name")
+        local used
+        used=$(zfs list -H -o used "$dataset_name")
+        local avail
+        avail=$(zfs list -H -o avail "$dataset_name")
         echo -e "  ${GREEN}EXISTS${NC} - Used: $used, Available: $avail"
     else
         echo "  NOT FOUND"
@@ -179,7 +190,8 @@ rollback_transaction() {
         print_success "Rollback completed"
 
         # Show final state
-        local final_state=$(transaction_get_info "$tx_id" "state")
+        local final_state
+        final_state=$(transaction_get_info "$tx_id" "state")
         echo ""
         echo "Final state: $final_state"
     else

@@ -78,8 +78,10 @@ _tx_init() {
 #   0 on success
 #######################################
 _tx_generate_id() {
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    local random=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local random
+    random=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
     echo "tx_${timestamp}_${random}"
 }
 
@@ -118,7 +120,8 @@ _tx_get_lock_file() {
 #######################################
 _tx_acquire_lock() {
     local tx_id="$1"
-    local lock_file=$(_tx_get_lock_file "$tx_id")
+    local lock_file
+    lock_file=$(_tx_get_lock_file "$tx_id")
     local timeout=30
 
     # Create lock file if it doesn't exist
@@ -160,7 +163,8 @@ _tx_acquire_lock() {
 _tx_release_lock() {
     local tx_id="$1"
     local lock_fd="$2"  # Now receives FD as second parameter
-    local lock_file=$(_tx_get_lock_file "$tx_id")
+    local lock_file
+    lock_file=$(_tx_get_lock_file "$tx_id")
 
     # Release flock and close FD
     if [[ -n "$lock_fd" && "$lock_fd" =~ ^[0-9]+$ ]]; then
@@ -239,8 +243,10 @@ transaction_start() {
     fi
 
     # Generate transaction ID
-    local tx_id=$(_tx_generate_id)
-    local state_file=$(_tx_get_state_file "$tx_id")
+    local tx_id
+    tx_id=$(_tx_generate_id)
+    local state_file
+    state_file=$(_tx_get_state_file "$tx_id")
 
     # Acquire lock
     local lock_fd
@@ -256,6 +262,7 @@ transaction_start() {
     else
         timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     fi
+# shellcheck disable=SC2155
     local state_content=$(cat <<EOF
 {
   "transaction_id": "$tx_id",
@@ -311,7 +318,8 @@ transaction_update_state() {
         return 1
     fi
 
-    local state_file=$(_tx_get_state_file "$tx_id")
+    local state_file
+    state_file=$(_tx_get_state_file "$tx_id")
 
     if [[ ! -f "$state_file" ]]; then
         echo "ERROR: Transaction state file not found: $tx_id" >&2
@@ -331,7 +339,8 @@ transaction_update_state() {
     fi
 
     # Update state using jq if available, otherwise use sed
-    local timestamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
+    local timestamp
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
     local updated_state
 
     if command -v jq >/dev/null 2>&1; then
@@ -438,7 +447,8 @@ transaction_get_info() {
         return 1
     fi
 
-    local state_file=$(_tx_get_state_file "$tx_id")
+    local state_file
+    state_file=$(_tx_get_state_file "$tx_id")
 
     if [[ ! -f "$state_file" ]]; then
         echo "ERROR: Transaction state file not found: $tx_id" >&2
@@ -688,7 +698,8 @@ transaction_list_pending() {
     for state_file in "$TX_STATE_DIR"/tx_*.json; do
         [[ ! -f "$state_file" ]] && continue
 
-        local tx_id=$(basename "$state_file" .json)
+        local tx_id
+        tx_id=$(basename "$state_file" .json)
         local state
         state=$(transaction_get_info "$tx_id" "state")
 
@@ -733,7 +744,8 @@ transaction_recover_all() {
     for state_file in "$TX_STATE_DIR"/tx_*.json; do
         [[ ! -f "$state_file" ]] && continue
 
-        local tx_id=$(basename "$state_file" .json)
+        local tx_id
+        tx_id=$(basename "$state_file" .json)
         local state
         state=$(transaction_get_info "$tx_id" "state")
 
@@ -812,7 +824,8 @@ transaction_cleanup() {
     for state_file in "$TX_STATE_DIR"/tx_*.json; do
         [[ ! -f "$state_file" ]] && continue
 
-        local tx_id=$(basename "$state_file" .json)
+        local tx_id
+        tx_id=$(basename "$state_file" .json)
         local state
         state=$(transaction_get_info "$tx_id" "state")
 
@@ -824,8 +837,10 @@ transaction_cleanup() {
         # Check file age
         local file_age_days
         if command -v stat >/dev/null 2>&1; then
-            local file_mtime=$(stat -c %Y "$state_file" 2>/dev/null || echo 0)
-            local current_time=$(date +%s)
+            local file_mtime
+            file_mtime=$(stat -c %Y "$state_file" 2>/dev/null || echo 0)
+            local current_time
+            current_time=$(date +%s)
             file_age_days=$(( (current_time - file_mtime) / 86400 ))
         else
             # Fallback: use find

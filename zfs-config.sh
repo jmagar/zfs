@@ -547,6 +547,7 @@ setup_cron_jobs() {
     fi
 
     # Get the directory where the config file is located
+# shellcheck disable=SC2155
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local dataset_script="$script_dir/zfs-auto-datasets-ubuntu.sh"
     local replication_script="$script_dir/zfs-replications-ubuntu.sh"
@@ -566,7 +567,8 @@ setup_cron_jobs() {
     chmod +x "$dataset_script" "$replication_script"
 
     # Create temporary crontab file
-    local temp_crontab=$(mktemp)
+    local temp_crontab
+    temp_crontab=$(mktemp)
 
     # Get existing crontab (ignore errors if no crontab exists)
     crontab -l 2>/dev/null > "$temp_crontab" || true
@@ -606,13 +608,14 @@ setup_cron_jobs() {
 }
 
 # Function to remove cron jobs
+# shellcheck disable=SC2155
 remove_cron_jobs() {
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local dataset_script="$script_dir/zfs-auto-datasets-ubuntu.sh"
     local replication_script="$script_dir/zfs-replications-ubuntu.sh"
 
     # Create temporary crontab file
-    local temp_crontab=$(mktemp)
+    local temp_crontab
+    temp_crontab=$(mktemp)
 
     # Get existing crontab (ignore errors if no crontab exists)
     if crontab -l 2>/dev/null > "$temp_crontab"; then

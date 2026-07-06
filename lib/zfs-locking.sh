@@ -135,7 +135,8 @@ acquire_lock() {
         log_message "INFO" "Acquiring lock: $description (timeout: ${timeout}s)"
     fi
 
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     while true; do
         # Try non-blocking lock
         if flock -n "$fd" 2>/dev/null; then
@@ -149,7 +150,8 @@ acquire_lock() {
         fi
 
         # Check timeout
-        local current_time=$(date +%s)
+        local current_time
+        current_time=$(date +%s)
         local elapsed=$((current_time - start_time))
 
         if [[ $elapsed -ge $timeout ]]; then

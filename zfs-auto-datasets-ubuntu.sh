@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154,SC2034
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # #   Script for watching ZFS datasets and auto converting regular folders to datasets                                                  # #
 # #   Ubuntu-compatible version with Gotify notifications and file logging                                                             # # 
@@ -109,7 +110,8 @@ recover_partial_conversions() {
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     # Write to log file
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
@@ -321,8 +323,10 @@ stop_docker_containers() {
     fi
     
     for container in $(docker ps -q 2>/dev/null); do
-        local container_name=$(docker container inspect --format '{{.Name}}' "$container" 2>/dev/null | cut -c 2-)
-        local bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' "$container" 2>/dev/null)
+        local container_name
+        container_name=$(docker container inspect --format '{{.Name}}' "$container" 2>/dev/null | cut -c 2-)
+        local bindmounts
+        bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' "$container" 2>/dev/null)
         
         if [[ -z "$bindmounts" ]]; then
             log_message "INFO" "Container $container_name has no bind mounts - no conversion needed"
@@ -440,11 +444,13 @@ get_vm_disk() {
     log_message "INFO" "Fetching disk info for VM: $vm_name"
     
     # Get target (like hdc, hda, etc.)
-    local vm_target=$(virsh domblklist "$vm_name" --details 2>/dev/null | grep disk | awk '{print $3}')
+    local vm_target
+    vm_target=$(virsh domblklist "$vm_name" --details 2>/dev/null | grep disk | awk '{print $3}')
     
     if [[ -n "$vm_target" ]]; then
         # Get the disk path for the given target
-        local vm_disk=$(virsh domblklist "$vm_name" 2>/dev/null | grep "$vm_target" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+        local vm_disk
+        vm_disk=$(virsh domblklist "$vm_name" 2>/dev/null | grep "$vm_target" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//;s/[ \t]*$//')
         log_message "INFO" "Found disk for $vm_name at target $vm_target: $vm_disk"
         echo "$vm_disk"
     else
@@ -487,7 +493,8 @@ stop_virtual_machines() {
         fi
         
         # Extract the dataset path (directory containing the vdisk file)
-        local dataset_path=$(dirname "$vm_disk")
+        local dataset_path
+        dataset_path=$(dirname "$vm_disk")
         local relative_path="${dataset_path#$MOUNT_POINT/$source_path_vms/}"
         local immediate_child="${relative_path%%/*}"
         local combined_path="$MOUNT_POINT/$source_path_vms/$immediate_child"
@@ -509,7 +516,8 @@ stop_virtual_machines() {
                             log_message "INFO" "Initiated graceful shutdown for VM: $vm"
 
                             # Poll VM state with proper timeout
-                            local start_time=$(date +%s)
+                            local start_time
+                            start_time=$(date +%s)
                             local shutdown_complete=false
 
                             while true; do
@@ -524,7 +532,8 @@ stop_virtual_machines() {
                                 fi
 
                                 # Check timeout
-                                local current_time=$(date +%s)
+                                local current_time
+                                current_time=$(date +%s)
                                 local elapsed=$((current_time - start_time))
 
                                 if [[ $elapsed -ge ${VM_FORCE_SHUTDOWN_WAIT:-90} ]]; then
@@ -652,7 +661,8 @@ create_datasets() {
     for entry in "$full_source_path"/*; do
         [[ ! -e "$entry" ]] && continue
         
-        local base_entry=$(basename "$entry")
+        local base_entry
+        base_entry=$(basename "$entry")
         
         # Avoid processing temp directories
         if [[ "$base_entry" == *_temp ]]; then
@@ -885,7 +895,8 @@ validate_sources_and_work() {
         if [[ -d "$full_path" ]]; then
             for entry in "$full_path"/*; do
                 [[ ! -e "$entry" ]] && continue
-                local base_entry=$(basename "$entry")
+                local base_entry
+                base_entry=$(basename "$entry")
                 
                 # Use direct zfs list instead of grep to prevent regex injection
                 local dataset_name="${source_path}/${base_entry}"

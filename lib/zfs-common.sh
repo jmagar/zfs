@@ -51,12 +51,14 @@ fi
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Validate log file
     if [[ -n "${LOG_FILE:-}" ]]; then
         # Ensure log directory exists
-        local log_dir=$(dirname "$LOG_FILE")
+        local log_dir
+        log_dir=$(dirname "$LOG_FILE")
         if [[ ! -d "$log_dir" ]]; then
             mkdir -p "$log_dir" 2>/dev/null || true
         fi
@@ -109,7 +111,8 @@ rotate_log() {
     log_message "INFO" "Log file size ($file_size bytes) exceeds limit ($max_bytes bytes), rotating logs"
 
     # Validate we can rotate the log
-    local log_dir=$(dirname "$LOG_FILE")
+    local log_dir
+    log_dir=$(dirname "$LOG_FILE")
 
     # Check if we have write permission to log directory
     if [[ ! -w "$log_dir" ]]; then
