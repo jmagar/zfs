@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # #   Script for ZFS dataset snapshotting and replication (local or remote)                                                          # #
 # #   Ubuntu-compatible version with Gotify notifications and file logging                                                          # # 
@@ -28,7 +29,6 @@ current_source_path=""
 current_zfs_destination_path=""
 current_destination_rsync_location=""
 current_sanoid_config_path=""
-tune="1"  # For different notification tunes
 
 #--------------------------------
 #     FUNCTIONS START HERE      #
@@ -38,7 +38,8 @@ tune="1"  # For different notification tunes
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     # Write to log file
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
@@ -313,7 +314,6 @@ autosnap() {
     
     # Run sanoid to create snapshots
     if "$SANOID_BINARY" --configdir="$current_sanoid_config_path" --take-snapshots; then
-        tune="2"  # Use different notification tune for snapshots
         local msg="Automatic snapshot creation successful for: $current_source_path"
         send_notification "$msg" "success"
         log_message "SUCCESS" "$msg"
@@ -449,6 +449,7 @@ rsync_replication() {
     
     log_message "INFO" "Starting rsync replication for: $current_source_path"
     
+# shellcheck disable=SC2155
     local snapshot_name="rsync_snapshot_$(date +%s)"
     local backup_date
     local destination

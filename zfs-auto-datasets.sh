@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154,SC2034
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # #   Script for watching a dataset and auto updating regular folders converting them to datasets                                         # #
 # #   (needs Unraid 6.12 or above)                                                                                                        # # 
@@ -112,8 +113,10 @@ stop_docker_containers() {
     echo "Checking Docker containers..."
     
     for container in $(docker ps -q); do
-      local container_name=$(docker container inspect --format '{{.Name}}' "$container" | cut -c 2-)
-      local bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' $container) 
+      local container_name
+      container_name=$(docker container inspect --format '{{.Name}}' "$container" | cut -c 2-)
+      local bindmounts
+      bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' $container)
       
       if [ -z "$bindmounts" ]; then
         echo "Container ${container_name} has no bind mounts so nothing to convert. No need to stop the container."
@@ -136,7 +139,8 @@ stop_docker_containers() {
             continue
         fi
 
-        local immediate_child=$(echo "$bindmount" | sed -n "s|^/mnt/$source_path_appdata/||p" | cut -d "/" -f 1)
+        local immediate_child
+        immediate_child=$(echo "$bindmount" | sed -n "s|^/mnt/$source_path_appdata/||p" | cut -d "/" -f 1)
         local combined_path="/mnt/$source_path_appdata/$immediate_child"
 
         is_zfs_dataset "$combined_path"
@@ -195,12 +199,14 @@ get_vm_disk() {
     echo "Fetching disk for VM: $vm_name" >&2
 
     # Get target (like hdc, hda, etc.)
-    local vm_target=$(virsh domblklist "$vm_name" --details | grep disk | awk '{print $3}')
+    local vm_target
+    vm_target=$(virsh domblklist "$vm_name" --details | grep disk | awk '{print $3}')
 
     # Check if target was found
     if [ -n "$vm_target" ]; then
         # Get the disk for the given target
-        local vm_disk=$(virsh domblklist "$vm_name" | grep "$vm_target" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+        local vm_disk
+        vm_disk=$(virsh domblklist "$vm_name" | grep "$vm_target" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//;s/[ \t]*$//')
         # Redirecting debug output to stderr
         echo "Found disk for $vm_name at target $vm_target: $vm_disk" >&2
         echo "$vm_disk"
@@ -223,7 +229,8 @@ stop_virtual_machines() {
         continue
       fi
 
-      local vm_disk=$(get_vm_disk "$vm")
+      local vm_disk
+      vm_disk=$(get_vm_disk "$vm")
 
       # If the disk is not set, skip this vm
       if [ -z "$vm_disk" ]; then
@@ -245,8 +252,10 @@ stop_virtual_machines() {
           continue
       fi
 
-      local dataset_path=$(get_dataset_path "$vm_disk")
-      local immediate_child=$(echo "$dataset_path" | sed -n "s|^/mnt/$source_path_vms/||p" | cut -d "/" -f 1)
+      local dataset_path
+      dataset_path=$(get_dataset_path "$vm_disk")
+      local immediate_child
+      immediate_child=$(echo "$dataset_path" | sed -n "s|^/mnt/$source_path_vms/||p" | cut -d "/" -f 1)
       local combined_path="/mnt/$source_path_vms/$immediate_child"
 
       is_zfs_dataset "$combined_path"
@@ -257,10 +266,12 @@ stop_virtual_machines() {
             virsh shutdown "$vm"  
             
       #  waiting loop for the VM to shutdown
-      local start_time=$(date +%s)
+      local start_time
+      start_time=$(date +%s)
       while virsh dominfo "$vm" | grep -q 'running'; do
     sleep 5
-    local current_time=$(date +%s)
+    local current_time
+    current_time=$(date +%s)
     if (( current_time - start_time >= $vm_forceshutdown_wait )); then
         echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
         virsh destroy "$vm"
@@ -304,6 +315,7 @@ start_virtual_machines() {
 normalize_name() {
   local original_name="$1"
   # Replace German umlauts with ASCII approximations
+# shellcheck disable=SC2155
   local normalized_name=$(echo "$original_name" | 
                           sed 's/ä/ae/g; s/ö/oe/g; s/ü/ue/g; 
                                s/Ä/Ae/g; s/Ö/Oe/g; s/Ü/Ue/g; 

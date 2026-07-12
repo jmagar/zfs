@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154,SC2034
 #set -x
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # #   Script for snapshoting and/or replication a zfs dataset locally or remotely using zfs or rsync depending on the destination         # #
@@ -447,10 +448,12 @@ rsync -avh --delete $link_dest "${snapshot_mount_point}/" "${rsync_destination}/
         fi
         #
         # Replication for child sub-datasets
-        local child_datasets=$(zfs list -r -H -o name "${source_path}" | tail -n +2)
+        local child_datasets
+        child_datasets=$(zfs list -r -H -o name "${source_path}" | tail -n +2)
         #
         for child_dataset in ${child_datasets}; do
-            local relative_path=$(echo "${child_dataset}" | sed "s|^${source_path}/||g")
+            local relative_path
+            relative_path=$(echo "${child_dataset}" | sed "s|^${source_path}/||g")
             echo "making a temporary zfs snapshot (child) for rsync"
             zfs snapshot "${child_dataset}@${snapshot_name}"
             snapshot_mount_point="/mnt/${child_dataset}/.zfs/snapshot/${snapshot_name}"
@@ -496,12 +499,13 @@ run_for_each_dataset() {
     selected_source_datasets=("$source_dataset")
   else
     # Filter datasets based on exclusion rules if auto-selection is enabled
+    local excludes_str=" ${source_dataset_auto_select_excludes[*]} "
     if [[ -z "$source_dataset_auto_select_exclude_prefix" ]]; then
       # Select all datasets if no exclusion prefix is specified
       while IFS= read -r line; do
         # Extract dataset name
         dataset_name=$(echo "$line" | awk -F'/' '{print $NF}')
-        if [[ ! " ${source_dataset_auto_select_excludes[@]} " =~ " ${dataset_name} " ]]; then
+        if [[ "$excludes_str" != *" $dataset_name "* ]]; then
           # Add dataset to the list if not excluded
           selected_source_datasets+=("$line")
         else
@@ -514,7 +518,7 @@ run_for_each_dataset() {
       while IFS= read -r line; do
         # Extract dataset name
         dataset_name=$(echo "$line" | awk -F'/' '{print $NF}')
-        if [[ ! " ${source_dataset_auto_select_excludes[@]} " =~ " ${dataset_name} " ]]; then
+        if [[ "$excludes_str" != *" $dataset_name "* ]]; then
           # Add dataset to the list if not excluded
           selected_source_datasets+=("$line")
       else

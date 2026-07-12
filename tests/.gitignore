@@ -1,0 +1,35 @@
+# BATS testing framework helper libraries
+# These are installed by setup.sh and should not be committed
+test_helper/bats-support/
+test_helper/bats-assert/
+test_helper/bats-file/
+
+# Test outputs and temporary files
+*.log
+*.tmp
+tmp/
+temp/
+/tmp/
+bats-*/
+fixtures/temp/
+fixtures/*.generated
+
+# Test coverage and results
+coverage/
+*.coverage
+.test-results/
+test-results/
+
+# Mock command directories (created during tests)
+mocks/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
