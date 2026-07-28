@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-07-27T09:08:35.056Z",
+  "updatedAt": "2026-07-28T05:04:10.000Z",
   "command": "update",
-  "gitHead": "90aaeb0d9cc505dfb04df3a5f7f6c2495bc6bcd3",
-  "model": "claude-opus-4.8"
+  "gitHead": "f0410123b0034cc907aaf11b659b3d4873bbc49d",
+  "model": "claude-4.8"
 }
