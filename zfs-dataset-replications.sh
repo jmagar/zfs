@@ -456,8 +456,10 @@ get_previous_backup() {
             # accepted as a backup, and rsync exits 0 on a non-directory --link-dest.
             # The trailing `exit 0` matters: with no subdirectories the loop's last
             # test fails and the command would otherwise report failure for a
-            # perfectly valid empty destination.
-            remote_listing=$(ssh "${remote_user}@${remote_server}" "if [ ! -d \"${destination_rsync_location}\" ]; then exit 3; fi; cd \"${destination_rsync_location}\" || exit 4; for e in */; do [ -d \"\$e\" ] && printf '%s\n' \"\${e%/}\"; done; exit 0") || listing_status=$?
+            # perfectly valid empty destination. `[ -r . ]` is checked first because
+            # a directory that is traversable but not readable produces the same
+            # empty glob, and would otherwise be reported as success.
+            remote_listing=$(ssh "${remote_user}@${remote_server}" "if [ ! -d \"${destination_rsync_location}\" ]; then exit 3; fi; cd \"${destination_rsync_location}\" || exit 4; [ -r . ] || exit 5; for e in */; do [ -d \"\$e\" ] && printf '%s\n' \"\${e%/}\"; done; exit 0") || listing_status=$?
             if [ "$listing_status" -eq 0 ]; then
                 previous_backup=$(printf '%s\n' "${remote_listing}" | grep -E "${dated_re}" | sort -r | grep -vxF "${backup_date}" | head -n 1)
             elif [ "$listing_status" -ne 3 ]; then
@@ -492,8 +494,11 @@ rsync_replication() {
         # snapshot leaked by an earlier run made `zfs snapshot` fail forever, and any
         # attempt to clear it first risked destroying the snapshot of a concurrently
         # running backup mid-transfer.
+        # $$ as well as the timestamp: two runs starting in the same second would
+        # otherwise share a name, and the second would fail to snapshot and skip its
+        # backup.
         local snapshot_name
-        snapshot_name="rsync_snapshot_$(date +%s)"
+        snapshot_name="rsync_snapshot_$(date +%s)_$$"
         if [ "$rsync_type" = "incremental" ]; then
             backup_date=$(date +%Y-%m-%d_%H%M)
             destination="${destination_rsync_location}/${backup_date}"
