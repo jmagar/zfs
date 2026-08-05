@@ -168,8 +168,14 @@ stop_docker_containers() {
       done <<< "$bindmounts"  #  send  bindmounts into the loop
 
       if [ "$stop_container" = true ]; then
-        docker stop "$container"
-        stopped_containers+=("$container_name")
+        # Guarded: start_docker_containers only restarts when dry_run is not "yes", so
+        # an unguarded stop here left containers down after a dry run.
+        if [ "$dry_run" != "yes" ]; then
+          docker stop "$container"
+          stopped_containers+=("$container_name")
+        else
+          echo "Dry Run: Docker container ${container_name} would be stopped"
+        fi
       else
         echo "Container ${container_name} is not required to be stopped as it is already a separate dataset."
       fi
@@ -235,6 +241,36 @@ get_vm_disk() {
 
 #-----------------------------------------------------------------------------------------------------------------------------------  
 # this function checks the vdisks any running vm. If visks is not inside a dataset it will stop the vm for processing the conversion
+# Shuts a VM down for conversion and records it for restart afterwards. Extracted so
+# both the "vdisk is a folder" path and the "vdisk could not be resolved" path stop
+# the VM, rather than the latter leaving it running while its vdisk is converted.
+shutdown_vm_for_conversion() {
+  local vm="$1"
+
+  if [ "$dry_run" != "yes" ]; then
+    virsh shutdown "$vm"
+
+    # waiting loop for the VM to shutdown
+    local start_time
+    start_time=$(date +%s)
+    while virsh dominfo "$vm" | grep -q 'running'; do
+      sleep 5
+      local current_time
+      current_time=$(date +%s)
+      if (( current_time - start_time >= vm_forceshutdown_wait )); then
+        echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
+        virsh destroy "$vm"
+        break
+      fi
+    done
+    stopped_vms+=("$vm")
+  else
+    # Not recorded in a dry run: nothing was stopped, so claiming it was (and that it
+    # will be restarted) would be untrue, the same way containers are handled.
+    echo "Dry Run: VM $vm would be stopped"
+  fi
+}
+#----------------------------------------------------------------------------------
 stop_virtual_machines() {
   if [ "$should_process_vms" = "yes" ]; then
     echo "Checking running VMs..."
@@ -271,8 +307,12 @@ stop_virtual_machines() {
               echo "vdisk $vm_disk for VM $vm does not exist; skipping it."
               continue
           elif [ "$vm_resolve_status" -ne 0 ]; then
-              echo "WARNING: could not resolve the real location of $vm_disk for VM $vm."
-              echo "WARNING: VM $vm cannot be checked and will NOT be stopped. If its vdisk lives under ${source_path_vms}, shut it down manually before converting."
+              # Fail safe: the vdisk exists but cannot be located, so we cannot tell
+              # whether it is about to be converted. Stopping a VM unnecessarily is
+              # recoverable -- it is restarted afterwards -- converting a vdisk that is
+              # still in use is not.
+              echo "Could not resolve the real location of $vm_disk for VM $vm; stopping the VM as a precaution."
+              shutdown_vm_for_conversion "$vm"
               continue
           fi
           vm_disk="$resolved_vm_disk"
@@ -292,27 +332,7 @@ stop_virtual_machines() {
       is_zfs_dataset "$combined_path"
       if [[ $? -eq 1 ]]; then
         echo "The vdisk for VM ${vm} is not a ZFS dataset (it's a folder). VM will be stopped so it can be converted to a dataset."
-        
-        if [ "$dry_run" != "yes" ]; then
-            virsh shutdown "$vm"  
-            
-      #  waiting loop for the VM to shutdown
-      local start_time
-      start_time=$(date +%s)
-      while virsh dominfo "$vm" | grep -q 'running'; do
-    sleep 5
-    local current_time
-    current_time=$(date +%s)
-    if (( current_time - start_time >= vm_forceshutdown_wait )); then
-        echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
-        virsh destroy "$vm"
-        break
-    fi
-done
-        else
-            echo "Dry Run: VM $vm would be stopped"
-        fi
-        stopped_vms+=("$vm")
+        shutdown_vm_for_conversion "$vm"
       else
         echo "VM ${vm} is not required to be stopped as its vdisk is already in its own dataset."
       fi
