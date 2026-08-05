@@ -130,10 +130,22 @@ stop_docker_containers() {
             # Resolve into a separate variable: assigning straight to $bindmount
             # overwrote it with find_real_location's error text, so the message below
             # reported that text instead of naming the path that actually failed.
+            # Status 1 means the path does not exist, so there is nothing there to
+            # convert and skipping is safe. Any other failure means the path exists
+            # but could not be located on a real disk -- we cannot tell whether it is
+            # about to be converted, so fail safe and stop the container. Stopping one
+            # unnecessarily is recoverable (it is restarted afterwards); converting
+            # appdata under a running container is not.
             local resolved_bindmount
-            if ! resolved_bindmount=$(find_real_location "$bindmount"); then
-                echo "Error finding real location for $bindmount in container $container_name."
+            local resolve_status=0
+            resolved_bindmount=$(find_real_location "$bindmount") || resolve_status=$?
+            if [ "$resolve_status" -eq 1 ]; then
+                echo "Bind mount $bindmount for container $container_name does not exist; skipping it."
                 continue
+            elif [ "$resolve_status" -ne 0 ]; then
+                echo "Could not resolve the real location of $bindmount for container $container_name; stopping the container as a precaution."
+                stop_container=true
+                break
             fi
             bindmount="$resolved_bindmount"
         fi
@@ -247,9 +259,20 @@ stop_virtual_machines() {
           # Resolve into a separate variable: assigning straight to $vm_disk
           # overwrote it with find_real_location's error text, so the message below
           # reported that text instead of naming the path that actually failed.
+          # Status 1 means the path does not exist, so there is nothing there to
+          # convert and skipping is safe. Any other failure means the vdisk exists but
+          # could not be located on a real disk, so this VM cannot be checked -- if it
+          # does live under source_path_vms it will be left running while its vdisk is
+          # converted. That is called out loudly rather than skipped silently.
           local resolved_vm_disk
-          if ! resolved_vm_disk=$(find_real_location "$vm_disk"); then
-              echo "Error finding real location for $vm_disk in VM $vm."
+          local vm_resolve_status=0
+          resolved_vm_disk=$(find_real_location "$vm_disk") || vm_resolve_status=$?
+          if [ "$vm_resolve_status" -eq 1 ]; then
+              echo "vdisk $vm_disk for VM $vm does not exist; skipping it."
+              continue
+          elif [ "$vm_resolve_status" -ne 0 ]; then
+              echo "WARNING: could not resolve the real location of $vm_disk for VM $vm."
+              echo "WARNING: VM $vm cannot be checked and will NOT be stopped. If its vdisk lives under ${source_path_vms}, shut it down manually before converting."
               continue
           fi
           vm_disk="$resolved_vm_disk"
@@ -342,7 +365,8 @@ create_datasets() {
       base_entry_no_spaces=$(if [ "$replace_spaces" = "yes" ]; then echo "$base_entry" | tr ' ' '_'; else echo "$base_entry"; fi)
       normalized_base_entry=$(normalize_name "$base_entry_no_spaces")
       
-      if zfs list -o name | grep -qE "^${source_path}/${normalized_base_entry}$"; then
+      # -xF for the same reason as above: the name is data, not a pattern.
+      if zfs list -o name | grep -qxF "${source_path}/${normalized_base_entry}"; then
         echo "Skipping dataset ${entry}..."
       elif [ -d "$entry" ]; then
         echo "Processing folder ${entry}..."
@@ -439,7 +463,10 @@ can_i_go_to_work() {
         local current_source_folder_count=0
         for entry in "${mount_point}/${source_path}"/*; do
             base_entry=$(basename "$entry")
-            if [ -d "$entry" ] && ! zfs list -o name | grep -q "^${source_path}/${base_entry}$"; then
+            # -xF: a folder name is matched literally against a whole line. As a regex,
+            # a name like media.v1 would also match an unrelated dataset mediaXv1 and
+            # the required conversion would be skipped.
+            if [ -d "$entry" ] && ! zfs list -o name | grep -qxF "${source_path}/${base_entry}"; then
 
                 current_source_folder_count=$((current_source_folder_count + 1))
             fi

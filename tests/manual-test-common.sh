@@ -127,13 +127,13 @@ echo "----------------------------------------"
 
 # Test 6: ensure_directory
 test_dir="$TEST_TEMP_DIR/new_test_dir"
-ensure_directory "$test_dir" >/dev/null 2>&1
-if [ -d "$test_dir" ]; then status=0; else status=1; fi
+# Inside the condition: as a bare statement under set -e a failing ensure_directory
+# aborts the script before test_result can record the failure.
+if ensure_directory "$test_dir" >/dev/null 2>&1 && [ -d "$test_dir" ]; then status=0; else status=1; fi
 test_result "ensure_directory creates directory" "$status"
 
 test_dir="$TEST_TEMP_DIR/nested/path/dir"
-ensure_directory "$test_dir" >/dev/null 2>&1
-if [ -d "$test_dir" ]; then status=0; else status=1; fi
+if ensure_directory "$test_dir" >/dev/null 2>&1 && [ -d "$test_dir" ]; then status=0; else status=1; fi
 test_result "ensure_directory creates nested directories" "$status"
 
 echo ""
