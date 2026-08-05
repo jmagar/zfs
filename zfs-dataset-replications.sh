@@ -170,7 +170,12 @@ pre_run_checks() {
     # This script has no validation library, and these values are embedded into
     # quoted remote commands sent over ssh, so a quote, backslash, backtick or $ in
     # them would break out of that quoting and run on the remote host.
-    for _remote_unsafe in "$parent_destination_folder" "$destination_pool" "$parent_destination_dataset"; do
+    # source_pool/source_dataset are included because update_paths builds
+    # destination_rsync_location out of them, and that value is interpolated into a
+    # remotely double-quoted word where $ and backticks are still live.
+    local _remote_unsafe
+    for _remote_unsafe in "$parent_destination_folder" "$destination_pool" \
+                          "$parent_destination_dataset" "$source_pool" "$source_dataset"; do
       case "$_remote_unsafe" in
         *[\'\"\`\$\\]*)
           msg="Error: destination settings may not contain quotes, backslashes, backticks or \$ when replicating to a remote host: ${_remote_unsafe}"
@@ -387,14 +392,22 @@ get_previous_backup() {
         # would link against a two-generations-old base and needlessly re-copy a whole
         # generation, while its children linked correctly. Excluding by name is
         # position-independent and right for both.
+        # Only dated backup directories are candidates. rsync exits 0 when handed a
+        # --link-dest that is not a directory, so a stray README or lost+found sorting
+        # above the real backups would silently turn every run into a full copy.
+        local dated_glob='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9]'
+        local dated_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$'
         if [ "$destination_remote" = "yes" ]; then
-            echo "Running: ssh ${remote_user}@${remote_server} \"ls ${destination_rsync_location} | sort -r | grep -vxF ${backup_date} | head -n 1\""
+            echo "Running: ssh ${remote_user}@${remote_server} \"ls ${destination_rsync_location} | grep -E ${dated_re} | sort -r | grep -vxF ${backup_date} | head -n 1\""
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            previous_backup=$(ssh "${remote_user}@${remote_server}" "ls \"${destination_rsync_location}\" | sort -r | grep -vxF \"${backup_date}\" | head -n 1")
+            if ! previous_backup=$(ssh "${remote_user}@${remote_server}" "ls \"${destination_rsync_location}\" | grep -E \"${dated_re}\" | sort -r | grep -vxF \"${backup_date}\" | head -n 1"); then
+                echo "Warning: could not reach ${remote_server} to list previous backups - this run will be a full copy"
+                previous_backup=""
+            fi
         else
-            # -H follows a symlinked backup root the way ls does, and ! -name '.*'
-            # hides dotfiles; without either, this returns the wrong entry or none.
-            previous_backup=$(find -H "${destination_rsync_location}" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | sort -r | grep -vxF "${backup_date}" | head -n 1)
+            # -H follows a symlinked backup root the way ls does; -type d and the dated
+            # name pattern keep non-backup entries out of the candidate set.
+            previous_backup=$(find -H "${destination_rsync_location}" -mindepth 1 -maxdepth 1 -type d -name "${dated_glob}" -printf '%f\n' 2>/dev/null | sort -r | grep -vxF "${backup_date}" | head -n 1)
         fi
     fi
 }
@@ -471,29 +484,53 @@ rsync_replication() {
         # Track failures rather than returning early, so the temporary snapshots are
         # always cleaned up. Previously every one of these results was discarded and
         # the run reported success even when the transfer had failed.
+        #
+        # Data failures and cleanup failures are tracked separately: a leaked snapshot
+        # is a real problem, but reporting "the backup is incomplete" when every byte
+        # transferred would send an operator into an unnecessary restore.
         local replication_failed=0
+        local cleanup_failed=0
         #
         local snapshot_mount_point="/mnt/${source_path}/.zfs/snapshot/${snapshot_name}"
         do_rsync "${snapshot_mount_point}" "${destination}" "" || replication_failed=1
         #
         echo "deleting temporary snapshot"
+        # Recorded, not returned: bailing out here skipped every child dataset and
+        # left a dated directory holding only the parent's files, which the next run
+        # then picked as its --link-dest base.
         if ! zfs destroy "${source_path}@${snapshot_name}"; then
             unraid_notify "Failed to delete ZFS snapshot after rsync: ${source_path}@${snapshot_name}" "failure"
-            return 1
+            cleanup_failed=1
         fi
         #
         # Replication for child sub-datasets
-        local child_datasets
-        child_datasets=$(zfs list -r -H -o name "${source_path}" | tail -n +2)
+        local child_datasets=""
+        local dataset_listing
+        # Captured before the pipe: `zfs list | tail` reports tail's status, so a
+        # failed listing would look like "no children" and back up the parent alone
+        # while reporting a fully successful run.
+        if dataset_listing=$(zfs list -r -H -o name "${source_path}"); then
+            child_datasets=$(printf '%s\n' "${dataset_listing}" | tail -n +2)
+        else
+            unraid_notify "Failed to list child datasets of ${source_path} - child datasets were not replicated" "failure"
+            replication_failed=1
+        fi
         #
         for child_dataset in ${child_datasets}; do
             local relative_path
             relative_path="${child_dataset#"${source_path}/"}"
             echo "making a temporary zfs snapshot (child) for rsync"
             if ! zfs snapshot "${child_dataset}@${snapshot_name}"; then
-                unraid_notify "Failed to create ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
-                replication_failed=1
-                continue
+                # This script uses a fixed snapshot name, so a snapshot leaked by an
+                # earlier run makes this fail forever. Clear it and retry once rather
+                # than wedging the child permanently.
+                echo "Snapshot creation failed; clearing any leftover ${snapshot_name} and retrying"
+                zfs destroy "${child_dataset}@${snapshot_name}" 2>/dev/null
+                if ! zfs snapshot "${child_dataset}@${snapshot_name}"; then
+                    unraid_notify "Failed to create ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
+                    replication_failed=1
+                    continue
+                fi
             fi
             snapshot_mount_point="/mnt/${child_dataset}/.zfs/snapshot/${snapshot_name}"
             child_destination="${destination}/${relative_path}"
@@ -501,13 +538,17 @@ rsync_replication() {
             # A leaked snapshot breaks the next run's snapshot of the same child.
             if ! zfs destroy "${child_dataset}@${snapshot_name}"; then
                 unraid_notify "Failed to delete ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
-                replication_failed=1
+                cleanup_failed=1
             fi
         done
         #
         # Only report success once every dataset (main and child) actually succeeded.
         if [ "$replication_failed" -ne 0 ]; then
             unraid_notify "Rsync ${rsync_type} replication finished with errors for source: ${source_path} - backup at ${destination} is incomplete" "failure"
+            return 1
+        fi
+        if [ "$cleanup_failed" -ne 0 ]; then
+            unraid_notify "Rsync ${rsync_type} replication of ${source_path} completed, but temporary snapshots could not be removed - the backup at ${destination} is complete" "failure"
             return 1
         fi
         if [ "$destination_remote" = "yes" ]; then
@@ -592,15 +633,24 @@ run_for_each_dataset() {
     autosnap
   done
 
+  # Replication failures are propagated: previously every return value here was
+  # discarded, so the script exited 0 even when every dataset had failed and any
+  # cron wrapper or monitoring keyed on exit status saw a clean run.
+  local failed_datasets=0
   for source_dataset_name in "${selected_source_datasets[@]}"; do
     update_paths "$source_dataset_name"
     echo "Performing autoprune for $source_dataset_name"
     autoprune
     echo "Performing rsync replication for $source_dataset_name"
-    rsync_replication
+    rsync_replication || failed_datasets=$((failed_datasets + 1))
     echo "Performing ZFS replication for $source_dataset_name"
-    zfs_replication
+    zfs_replication || failed_datasets=$((failed_datasets + 1))
   done
+
+  if [ "$failed_datasets" -ne 0 ]; then
+    echo "ERROR: ${failed_datasets} replication task(s) failed - see errors above"
+    return 1
+  fi
 }
 
 #

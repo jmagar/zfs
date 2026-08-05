@@ -437,21 +437,29 @@ get_previous_backup() {
     #
     # This function's stdout IS its return value, so anything logged here must go to
     # stderr or it would be captured as the backup name.
+    # Only dated backup directories are candidates. rsync exits 0 when handed a
+    # --link-dest that is not a directory, so a stray README or lost+found sorting
+    # above the real backups would silently turn every run into a full copy.
+    local dated_glob='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9]'
+    local dated_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$'
     if [[ "$RSYNC_TYPE" == "incremental" ]]; then
         if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
             # A non-zero status here means ssh could not reach the host, which is worth
             # reporting: silently returning "" makes an unreachable remote look like an
             # empty backup directory and quietly downgrades the run to a full copy.
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            if ! previous_backup=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "ls '$current_destination_rsync_location' 2>/dev/null | sort -r | grep -vxF '$backup_date' | head -n 1"); then
+            if ! previous_backup=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "ls '$current_destination_rsync_location' 2>/dev/null | grep -E '$dated_re' | sort -r | grep -vxF '$backup_date' | head -n 1"); then
                 log_message "WARNING" "Could not reach ${REMOTE_SERVER} to list previous backups - proceeding without --link-dest (this run will be a full copy)" >&2
                 previous_backup=""
             fi
         else
             if [[ -d "$current_destination_rsync_location" ]]; then
-                # -H follows a symlinked backup root the way ls does, and ! -name '.*'
-                # hides dotfiles; without either, this returns the wrong entry or none.
-                previous_backup=$(find -H "$current_destination_rsync_location" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -r | grep -vxF "$backup_date" | head -n 1)
+                # -H follows a symlinked backup root the way ls does; -type d and the
+                # dated name pattern keep non-backup entries out of the candidate set.
+                # Errors are deliberately not suppressed: -printf is GNU-only, and
+                # swallowing that failure would look identical to "no previous backup"
+                # and silently downgrade every run to a full copy.
+                previous_backup=$(find -H "$current_destination_rsync_location" -mindepth 1 -maxdepth 1 -type d -name "$dated_glob" -printf '%f\n' | sort -r | grep -vxF "$backup_date" | head -n 1)
             fi
         fi
     fi
@@ -506,7 +514,10 @@ rsync_replication() {
             # Create remote directory if incremental
             if [[ "$RSYNC_TYPE" == "incremental" ]]; then
                 # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-                ssh "${REMOTE_USER}@${REMOTE_SERVER}" "mkdir -p '$rsync_destination'" || return 1
+                if ! ssh "${REMOTE_USER}@${REMOTE_SERVER}" "mkdir -p '$rsync_destination'"; then
+                    log_message "ERROR" "Failed to create remote backup directory: ${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination"
+                    return 1
+                fi
             fi
             
             # Perform remote rsync
@@ -519,7 +530,10 @@ rsync_replication() {
         else
             # Create local directory if incremental
             if [[ "$RSYNC_TYPE" == "incremental" ]]; then
-                mkdir -p "$rsync_destination" || return 1
+                if ! mkdir -p "$rsync_destination"; then
+                    log_message "ERROR" "Failed to create local backup directory: $rsync_destination"
+                    return 1
+                fi
             fi
             
             # Perform local rsync
@@ -553,9 +567,23 @@ rsync_replication() {
         # Process child datasets. Failures are tracked rather than returned early so
         # the remaining snapshots still get cleaned up; previously every child result
         # was discarded and a failed child still reported overall success.
+        #
+        # Data failures and cleanup failures are tracked separately: a leaked snapshot
+        # is a real problem, but reporting "the backup is incomplete" when every byte
+        # transferred would send an operator into an unnecessary restore.
         local replication_failed=0
-        local child_datasets
-        child_datasets=$(zfs list -r -H -o name "$current_source_path" | tail -n +2)
+        local cleanup_failed=0
+        local child_datasets=""
+        local dataset_listing
+        # Captured before the pipe: `zfs list | tail` reports tail's status, so a
+        # failed listing would look like "no children" and back up the parent alone
+        # while reporting a fully successful run.
+        if dataset_listing=$(zfs list -r -H -o name "$current_source_path"); then
+            child_datasets=$(printf '%s\n' "$dataset_listing" | tail -n +2)
+        else
+            log_message "ERROR" "Failed to list child datasets of $current_source_path - child datasets were not replicated"
+            replication_failed=1
+        fi
 
         while IFS= read -r child_dataset; do
             [[ -z "$child_dataset" ]] && continue
@@ -572,7 +600,12 @@ rsync_replication() {
                     log_message "ERROR" "Rsync failed for child dataset: $child_dataset"
                     replication_failed=1
                 fi
-                zfs destroy "${child_dataset}@${snapshot_name}" 2>/dev/null
+                # Tracked rather than discarded: a snapshot that cannot be destroyed
+                # accumulates on every run and pins space in the source pool.
+                if ! zfs destroy "${child_dataset}@${snapshot_name}"; then
+                    log_message "ERROR" "Failed to delete snapshot for child dataset: ${child_dataset}@${snapshot_name}"
+                    cleanup_failed=1
+                fi
             else
                 # Skipping silently left a gap in the backup that was still reported
                 # as a successful run.
@@ -586,11 +619,18 @@ rsync_replication() {
         if ! zfs destroy "${current_source_path}@${snapshot_name}"; then
             local msg="Failed to delete temporary snapshot: ${current_source_path}@${snapshot_name}"
             send_notification "$msg" "error"
+            cleanup_failed=1
         fi
 
         # Only report success once every dataset (main and child) actually succeeded.
         if [[ "$replication_failed" -ne 0 ]]; then
             local msg="Rsync $RSYNC_TYPE replication finished with errors for $current_source_path - backup at $destination is incomplete"
+            send_notification "$msg" "error"
+            log_message "ERROR" "$msg"
+            return 1
+        fi
+        if [[ "$cleanup_failed" -ne 0 ]]; then
+            local msg="Rsync $RSYNC_TYPE replication of $current_source_path completed, but temporary snapshots could not be removed - the backup at $destination is complete"
             send_notification "$msg" "error"
             log_message "ERROR" "$msg"
             return 1
@@ -694,13 +734,22 @@ run_for_each_dataset() {
     
     # Phase 3: Snapshot pruning and replication
     log_message "INFO" "Phase 3: Pruning snapshots and performing replication"
+    # Replication failures are propagated: previously every return value here was
+    # discarded and the run logged "All datasets processed successfully" and exited 0
+    # even when every dataset had failed, so cron and monitoring saw a clean run.
+    local failed_datasets=0
     for source_dataset_name in "${selected_source_datasets[@]}"; do
         update_paths "$source_dataset_name"
         autoprune
-        rsync_replication
-        zfs_replication
+        rsync_replication || failed_datasets=$((failed_datasets + 1))
+        zfs_replication || failed_datasets=$((failed_datasets + 1))
     done
-    
+
+    if [[ "$failed_datasets" -ne 0 ]]; then
+        log_message "ERROR" "$failed_datasets replication task(s) failed - see errors above"
+        return 1
+    fi
+
     log_message "SUCCESS" "All datasets processed successfully"
 }
 
@@ -715,9 +764,13 @@ main() {
     log_message "INFO" "Configuration: DRY_RUN=$DRY_RUN, SOURCE_POOL=$SOURCE_POOL, REPLICATION=$REPLICATION"
     
     # Execute the main processing function
-    run_for_each_dataset
-    
+    local run_status=0
+    run_for_each_dataset || run_status=1
+
     log_message "INFO" "=== ZFS Snapshot & Replication Completed ==="
+    # Exit non-zero so cron wrappers, systemd units and monitoring can tell a failed
+    # run from a clean one.
+    return "$run_status"
 }
 
 # Execute main function
