@@ -116,7 +116,7 @@ stop_docker_containers() {
       local container_name
       container_name=$(docker container inspect --format '{{.Name}}' "$container" | cut -c 2-)
       local bindmounts
-      bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' $container)
+      bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' "$container")
       
       if [ -z "$bindmounts" ]; then
         echo "Container ${container_name} has no bind mounts so nothing to convert. No need to stop the container."
@@ -127,11 +127,15 @@ stop_docker_containers() {
 
       while IFS= read -r bindmount; do
         if [[ "$bindmount" == /mnt/user/* ]]; then
-            bindmount=$(find_real_location "$bindmount")
-            if [[ $? -ne 0 ]]; then
+            # Resolve into a separate variable: assigning straight to $bindmount
+            # overwrote it with find_real_location's error text, so the message below
+            # reported that text instead of naming the path that actually failed.
+            local resolved_bindmount
+            if ! resolved_bindmount=$(find_real_location "$bindmount"); then
                 echo "Error finding real location for $bindmount in container $container_name."
                 continue
             fi
+            bindmount="$resolved_bindmount"
         fi
 
         # check if bind mount matches source_path_appdata, if not, skip it
@@ -240,11 +244,15 @@ stop_virtual_machines() {
       
       # Check if VM disk is in a folder and matches source_path_vms
       if [[ "$vm_disk" == /mnt/user/* ]]; then
-          vm_disk=$(find_real_location "$vm_disk")
-          if [[ $? -ne 0 ]]; then
+          # Resolve into a separate variable: assigning straight to $vm_disk
+          # overwrote it with find_real_location's error text, so the message below
+          # reported that text instead of naming the path that actually failed.
+          local resolved_vm_disk
+          if ! resolved_vm_disk=$(find_real_location "$vm_disk"); then
               echo "Error finding real location for $vm_disk in VM $vm."
               continue
           fi
+          vm_disk="$resolved_vm_disk"
       fi
 
       # Check if vm_disk matches source_path_vms, if not, skip it
@@ -272,7 +280,7 @@ stop_virtual_machines() {
     sleep 5
     local current_time
     current_time=$(date +%s)
-    if (( current_time - start_time >= $vm_forceshutdown_wait )); then
+    if (( current_time - start_time >= vm_forceshutdown_wait )); then
         echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
         virsh destroy "$vm"
         break
@@ -431,7 +439,7 @@ can_i_go_to_work() {
         local current_source_folder_count=0
         for entry in "${mount_point}/${source_path}"/*; do
             base_entry=$(basename "$entry")
-            if [ -d "$entry" ] && ! zfs list -o name | grep -q "^${source_path}/$(echo "$base_entry")$"; then
+            if [ -d "$entry" ] && ! zfs list -o name | grep -q "^${source_path}/${base_entry}$"; then
 
                 current_source_folder_count=$((current_source_folder_count + 1))
             fi

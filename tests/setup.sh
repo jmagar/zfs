@@ -56,7 +56,7 @@ install_bats() {
     # Fallback to source installation
     echo "  Installing BATS from source..."
     TEMP_DIR=$(mktemp -d)
-    trap "rm -rf $TEMP_DIR" EXIT
+    trap 'rm -rf "$TEMP_DIR"' EXIT
 
     git clone --depth 1 https://github.com/bats-core/bats-core.git "$TEMP_DIR/bats-core"
     cd "$TEMP_DIR/bats-core"

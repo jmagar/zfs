@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source the shared configuration file
 if [[ -f "$SCRIPT_DIR/zfs-config.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved config, linted separately
     source "$SCRIPT_DIR/zfs-config.sh"
 else
     echo "ERROR: Cannot find zfs-config.sh in $SCRIPT_DIR" >&2
@@ -58,7 +59,9 @@ rotate_log() {
     if command -v stat >/dev/null 2>&1; then
         file_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
     else
-        file_size=$(ls -la "$LOG_FILE" 2>/dev/null | awk '{print $5}' || echo 0)
+        # Grouped so a failed input redirection is silenced too; `< file 2>/dev/null`
+        # applies redirections left to right, so the open error still reaches stderr.
+        file_size=$( { wc -c < "$LOG_FILE"; } 2>/dev/null || echo 0)
     fi
     
     # Convert LOG_MAX_SIZE to bytes (handles M, K suffixes)
@@ -362,6 +365,7 @@ zfs_replication() {
         
         # Ensure parent destination dataset exists on remote server
         log_message "INFO" "Ensuring parent destination dataset exists on remote server"
+        # shellcheck disable=SC2029 # client-side expansion is intended: the dataset variables only exist locally
         if ! ssh "${REMOTE_USER}@${REMOTE_SERVER}" "zfs list -o name -H '${DESTINATION_POOL}/${PARENT_DESTINATION_DATASET}' &>/dev/null || zfs create '${DESTINATION_POOL}/${PARENT_DESTINATION_DATASET}'"; then
             local msg="Failed to create parent ZFS dataset on remote server: ${DESTINATION_POOL}/${PARENT_DESTINATION_DATASET}"
             send_notification "$msg" "error"
@@ -424,16 +428,34 @@ zfs_replication() {
 get_previous_backup() {
     local previous_backup=""
     
+    # Pick the newest backup that is not the one being written now. Selecting by
+    # position instead ("2nd newest") is only correct once the in-progress dated
+    # directory exists, so the parent dataset -- rsynced before that mkdir runs --
+    # would link against a two-generations-old base and needlessly re-copy a whole
+    # generation, while its children linked correctly. Excluding by name is
+    # position-independent and right for both.
+    #
+    # This function's stdout IS its return value, so anything logged here must go to
+    # stderr or it would be captured as the backup name.
     if [[ "$RSYNC_TYPE" == "incremental" ]]; then
         if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
-            previous_backup=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "ls '$current_destination_rsync_location' 2>/dev/null | sort -r | head -n 2 | tail -n 1" 2>/dev/null || echo "")
+            # A non-zero status here means ssh could not reach the host, which is worth
+            # reporting: silently returning "" makes an unreachable remote look like an
+            # empty backup directory and quietly downgrades the run to a full copy.
+            # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
+            if ! previous_backup=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "ls '$current_destination_rsync_location' 2>/dev/null | sort -r | grep -vxF '$backup_date' | head -n 1"); then
+                log_message "WARNING" "Could not reach ${REMOTE_SERVER} to list previous backups - proceeding without --link-dest (this run will be a full copy)" >&2
+                previous_backup=""
+            fi
         else
             if [[ -d "$current_destination_rsync_location" ]]; then
-                previous_backup=$(ls "$current_destination_rsync_location" 2>/dev/null | sort -r | head -n 2 | tail -n 1 || echo "")
+                # -H follows a symlinked backup root the way ls does, and ! -name '.*'
+                # hides dotfiles; without either, this returns the wrong entry or none.
+                previous_backup=$(find -H "$current_destination_rsync_location" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -r | grep -vxF "$backup_date" | head -n 1)
             fi
         fi
     fi
-    
+
     echo "$previous_backup"
 }
 
@@ -471,10 +493,10 @@ rsync_replication() {
         local previous_backup
         previous_backup=$(get_previous_backup)
         
-        local link_dest=""
+        local -a link_dest=()
         if [[ -n "$previous_backup" && "$RSYNC_TYPE" == "incremental" ]]; then
             local link_dest_path="$current_destination_rsync_location/$previous_backup$relative_dataset_path"
-            link_dest="--link-dest=$link_dest_path"
+            link_dest=("--link-dest=$link_dest_path")
             log_message "INFO" "Using link-dest: $link_dest_path"
         fi
         
@@ -483,14 +505,15 @@ rsync_replication() {
         if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
             # Create remote directory if incremental
             if [[ "$RSYNC_TYPE" == "incremental" ]]; then
+                # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
                 ssh "${REMOTE_USER}@${REMOTE_SERVER}" "mkdir -p '$rsync_destination'" || return 1
             fi
             
             # Perform remote rsync
             if [[ "$DRY_RUN" != "yes" ]]; then
-                rsync -azvh --delete $link_dest -e ssh "$snapshot_mount_point/" "${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/"
+                rsync -azvh --delete "${link_dest[@]}" -e ssh "$snapshot_mount_point/" "${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/"
             else
-                log_message "INFO" "DRY RUN: Would run rsync -azvh --delete $link_dest -e ssh '$snapshot_mount_point/' '${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/'"
+                log_message "INFO" "DRY RUN: Would run rsync -azvh --delete ${link_dest[*]} -e ssh '$snapshot_mount_point/' '${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/'"
                 return 0
             fi
         else
@@ -501,9 +524,9 @@ rsync_replication() {
             
             # Perform local rsync
             if [[ "$DRY_RUN" != "yes" ]]; then
-                rsync -avh --delete $link_dest "$snapshot_mount_point/" "$rsync_destination/"
+                rsync -avh --delete "${link_dest[@]}" "$snapshot_mount_point/" "$rsync_destination/"
             else
-                log_message "INFO" "DRY RUN: Would run rsync -avh --delete $link_dest '$snapshot_mount_point/' '$rsync_destination/'"
+                log_message "INFO" "DRY RUN: Would run rsync -avh --delete ${link_dest[*]} '$snapshot_mount_point/' '$rsync_destination/'"
                 return 0
             fi
         fi
@@ -527,33 +550,52 @@ rsync_replication() {
             return 1
         fi
         
-        # Process child datasets
+        # Process child datasets. Failures are tracked rather than returned early so
+        # the remaining snapshots still get cleaned up; previously every child result
+        # was discarded and a failed child still reported overall success.
+        local replication_failed=0
         local child_datasets
         child_datasets=$(zfs list -r -H -o name "$current_source_path" | tail -n +2)
-        
+
         while IFS= read -r child_dataset; do
             [[ -z "$child_dataset" ]] && continue
-            
-            local relative_path="${child_dataset#$current_source_path/}"
+
+            local relative_path="${child_dataset#"$current_source_path/"}"
             log_message "INFO" "Processing child dataset: $child_dataset"
-            
+
             # Create snapshot for child dataset
             if zfs snapshot "${child_dataset}@${snapshot_name}"; then
                 local child_snapshot_mount="$MOUNT_POINT/${child_dataset}/.zfs/snapshot/${snapshot_name}"
                 local child_destination="$destination/$relative_path"
-                
-                do_rsync "$child_snapshot_mount" "$child_destination" "/$relative_path"
+
+                if ! do_rsync "$child_snapshot_mount" "$child_destination" "/$relative_path"; then
+                    log_message "ERROR" "Rsync failed for child dataset: $child_dataset"
+                    replication_failed=1
+                fi
                 zfs destroy "${child_dataset}@${snapshot_name}" 2>/dev/null
+            else
+                # Skipping silently left a gap in the backup that was still reported
+                # as a successful run.
+                log_message "ERROR" "Failed to snapshot child dataset: ${child_dataset}@${snapshot_name}"
+                replication_failed=1
             fi
         done <<< "$child_datasets"
-        
+
         # Clean up main snapshot
         log_message "INFO" "Cleaning up temporary snapshot"
         if ! zfs destroy "${current_source_path}@${snapshot_name}"; then
             local msg="Failed to delete temporary snapshot: ${current_source_path}@${snapshot_name}"
             send_notification "$msg" "error"
         fi
-        
+
+        # Only report success once every dataset (main and child) actually succeeded.
+        if [[ "$replication_failed" -ne 0 ]]; then
+            local msg="Rsync $RSYNC_TYPE replication finished with errors for $current_source_path - backup at $destination is incomplete"
+            send_notification "$msg" "error"
+            log_message "ERROR" "$msg"
+            return 1
+        fi
+
         # Success notification
         local msg="Rsync $RSYNC_TYPE replication successful from $current_source_path to $destination"
         send_notification "$msg" "success"
@@ -598,7 +640,7 @@ run_for_each_dataset() {
             [[ -z "$dataset_path" ]] && continue
             
             # Extract just the dataset name (not the full path)
-            local dataset_name="${dataset_path#$SOURCE_POOL/}"
+            local dataset_name="${dataset_path#"$SOURCE_POOL/"}"
             
             # Skip if dataset name contains a slash (not a direct child)
             [[ "$dataset_name" == *"/"* ]] && continue

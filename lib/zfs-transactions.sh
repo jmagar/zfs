@@ -38,14 +38,17 @@ ZFS_TX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source dependencies
 if [[ -f "$ZFS_TX_LIB_DIR/zfs-common.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_TX_LIB_DIR/zfs-common.sh"
 fi
 
 if [[ -f "$ZFS_TX_LIB_DIR/zfs-validation.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_TX_LIB_DIR/zfs-validation.sh"
 fi
 
 if [[ -f "$ZFS_TX_LIB_DIR/zfs-error-handling.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_TX_LIB_DIR/zfs-error-handling.sh"
 fi
 
@@ -168,7 +171,7 @@ _tx_release_lock() {
 
     # Release flock and close FD
     if [[ -n "$lock_fd" && "$lock_fd" =~ ^[0-9]+$ ]]; then
-        flock -u $lock_fd 2>/dev/null || true
+        flock -u "$lock_fd" 2>/dev/null || true
         exec {lock_fd}>&- 2>/dev/null || true
     fi
 

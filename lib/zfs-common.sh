@@ -28,10 +28,12 @@ ZFS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source dependencies if available
 # Note: These may not exist yet in Phase 1, so we check first
 if [[ -f "$ZFS_LIB_DIR/zfs-validation.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_LIB_DIR/zfs-validation.sh"
 fi
 
 if [[ -f "$ZFS_LIB_DIR/zfs-error-handling.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_LIB_DIR/zfs-error-handling.sh"
 fi
 
@@ -91,7 +93,9 @@ rotate_log() {
     if command -v stat >/dev/null 2>&1; then
         file_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
     else
-        file_size=$(ls -la "$LOG_FILE" 2>/dev/null | awk '{print $5}' || echo 0)
+        # Grouped so a failed input redirection is silenced too; `< file 2>/dev/null`
+        # applies redirections left to right, so the open error still reaches stderr.
+        file_size=$( { wc -c < "$LOG_FILE"; } 2>/dev/null || echo 0)
     fi
 
     # Convert LOG_MAX_SIZE to bytes (handles M, K, G suffixes)

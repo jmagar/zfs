@@ -167,6 +167,19 @@ pre_run_checks() {
   #
   if [ "$destination_remote" = "yes" ]; then
     echo "Replication target is a remote server. I will check it is available..."
+    # This script has no validation library, and these values are embedded into
+    # quoted remote commands sent over ssh, so a quote, backslash, backtick or $ in
+    # them would break out of that quoting and run on the remote host.
+    for _remote_unsafe in "$parent_destination_folder" "$destination_pool" "$parent_destination_dataset"; do
+      case "$_remote_unsafe" in
+        *[\'\"\`\$\\]*)
+          msg="Error: destination settings may not contain quotes, backslashes, backticks or \$ when replicating to a remote host: ${_remote_unsafe}"
+          echo "$msg"
+          unraid_notify "$msg" "failure"
+          exit 1
+          ;;
+      esac
+    done
     # Attempt an SSH connection. If it fails, print an error message and exit.
     if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" echo 'SSH connection successful' &>/dev/null; then
       msg='SSH connection failed. Please check your remote server details and ensure ssh keys are exchanged.'
@@ -253,18 +266,20 @@ create_sanoid_config() {
   fi
 #
 # this  creates the new configuration file based off variables for retention
-  echo "[${source_path}]" > "${sanoid_config_complete_path}sanoid.conf"
-  echo "use_template = production" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "recursive = yes" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "[template_production]" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "hourly = ${snapshot_hours}" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "daily = ${snapshot_days}" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "weekly = ${snapshot_weeks}" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "monthly = ${snapshot_months}" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "yearly = ${snapshot_years}" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "autosnap = yes" >> "${sanoid_config_complete_path}sanoid.conf"
-  echo "autoprune = yes" >> "${sanoid_config_complete_path}sanoid.conf"
+  {
+    echo "[${source_path}]"
+    echo "use_template = production"
+    echo "recursive = yes"
+    echo ""
+    echo "[template_production]"
+    echo "hourly = ${snapshot_hours}"
+    echo "daily = ${snapshot_days}"
+    echo "weekly = ${snapshot_weeks}"
+    echo "monthly = ${snapshot_months}"
+    echo "yearly = ${snapshot_years}"
+    echo "autosnap = yes"
+    echo "autoprune = yes"
+  } > "${sanoid_config_complete_path}sanoid.conf"
 }
 #
 ####################
@@ -275,10 +290,8 @@ autosnap() {
   if [[ "${autosnapshots}" == "yes" ]]; then
     # Create the snapshots on the source directory using Sanoid if required
     echo "creating the automatic snapshots of ${source_path} using sanoid based off retention policy"
-    /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --take-snapshots
-    #
-    # check the exit status of the sanoid command 
-    if [ $? -eq 0 ]; then
+    # check the exit status of the sanoid command
+    if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --take-snapshots; then
       tune="2"
       unraid_notify "Automatic snapshot creation using Sanoid was successful for source: ${source_path}" "success"
     else
@@ -314,8 +327,8 @@ zfs_replication() {
     if [ "$destination_remote" = "yes" ]; then
       destination="${remote_user}@${remote_server}:${zfs_destination_path}"
       # check if the parent destination ZFS dataset exists on the remote server. If not, create it.
-      ssh "${remote_user}@${remote_server}" "if ! zfs list -o name -H '${destination_pool}/${parent_destination_dataset}' &>/dev/null; then zfs create '${destination_pool}/${parent_destination_dataset}'; fi"
-      if [ $? -ne 0 ]; then
+      # shellcheck disable=SC2029 # client-side expansion is intended: the dataset variables only exist locally
+      if ! ssh "${remote_user}@${remote_server}" "if ! zfs list -o name -H '${destination_pool}/${parent_destination_dataset}' &>/dev/null; then zfs create '${destination_pool}/${parent_destination_dataset}'; fi"; then
         unraid_notify "Failed to check or create ZFS dataset on remote server: ${destination}" "failure"
         return 1
       fi
@@ -323,8 +336,7 @@ zfs_replication() {
       destination="${zfs_destination_path}"
       # check if the parent destination ZFS dataset exists locally. If not, create it.
       if ! zfs list -o name -H "${destination_pool}/${parent_destination_dataset}" &>/dev/null; then
-        zfs create "${destination_pool}/${parent_destination_dataset}"
-        if [ $? -ne 0 ]; then
+        if ! zfs create "${destination_pool}/${parent_destination_dataset}"; then
           unraid_notify "Failed to check or create local ZFS dataset: ${destination_pool}/${parent_destination_dataset}" "failure"
           return 1
         fi
@@ -347,8 +359,7 @@ zfs_replication() {
     #
     # Use syncoid to replicate snapshot to the destination dataset
     echo "Starting ZFS replication using syncoid with mode: ${syncoid_mode}"
-    /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_path}" "${destination}"
-    if [ $? -eq 0 ]; then
+    if /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_path}" "${destination}"; then
       if [ "$destination_remote" = "yes" ]; then
         unraid_notify "ZFS replication was successful from source: ${source_path} to remote destination: ${destination}" "success"
       else
@@ -370,19 +381,30 @@ zfs_replication() {
 # Gets the most recent backup to compare against (used by below funcrions)
 get_previous_backup() {
     if [ "$rsync_type" = "incremental" ]; then
+        # Pick the newest backup that is not the one being written now. Selecting by
+        # position instead ("2nd newest") is only correct once the in-progress dated
+        # directory exists, so the parent dataset -- rsynced before that mkdir runs --
+        # would link against a two-generations-old base and needlessly re-copy a whole
+        # generation, while its children linked correctly. Excluding by name is
+        # position-independent and right for both.
         if [ "$destination_remote" = "yes" ]; then
-            echo "Running: ssh ${remote_user}@${remote_server} \"ls ${destination_rsync_location} | sort -r | head -n 2 | tail -n 1\""
-            previous_backup=$(ssh "${remote_user}@${remote_server}" "ls \"${destination_rsync_location}\" | sort -r | head -n 2 | tail -n 1")
+            echo "Running: ssh ${remote_user}@${remote_server} \"ls ${destination_rsync_location} | sort -r | grep -vxF ${backup_date} | head -n 1\""
+            # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
+            previous_backup=$(ssh "${remote_user}@${remote_server}" "ls \"${destination_rsync_location}\" | sort -r | grep -vxF \"${backup_date}\" | head -n 1")
         else
-            previous_backup=$(ls "${destination_rsync_location}" | sort -r | head -n 2 | tail -n 1)
+            # -H follows a symlinked backup root the way ls does, and ! -name '.*'
+            # hides dotfiles; without either, this returns the wrong entry or none.
+            previous_backup=$(find -H "${destination_rsync_location}" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | sort -r | grep -vxF "${backup_date}" | head -n 1)
         fi
     fi
 }
 #
 rsync_replication() {
-    local previous_backup  # declare variable 
+    local previous_backup  # declare variable
 
-    IFS=$'\n'
+    # Function-scoped: a bare assignment leaked newline-only word splitting into
+    # everything this script ran afterwards, including later dataset iterations.
+    local IFS=$'\n'
     if [ "$replication" = "rsync" ]; then
         local snapshot_name="rsync_snapshot"
         if [ "$rsync_type" = "incremental" ]; then
@@ -398,32 +420,42 @@ rsync_replication() {
             local relative_dataset_path="$3"
             get_previous_backup
             local link_dest_path="${destination_rsync_location}/${previous_backup}${relative_dataset_path}"
-            [ -z "$previous_backup" ] && local link_dest="" || local link_dest="--link-dest=${link_dest_path}"
-            echo "Link dest value is: $link_dest"
+            local -a link_dest=()
+            if [ -n "$previous_backup" ]; then
+                link_dest=("--link-dest=${link_dest_path}")
+            fi
             # Log the link_dest value for debugging
-            echo "Link dest value is: $link_dest"
+            echo "Link dest value is: ${link_dest[*]}"
             #
             if [ "$destination_remote" = "yes" ]; then
-                # Create the remote directory 
-                [ "$rsync_type" = "incremental" ] && ssh "${remote_user}@${remote_server}" "mkdir -p \"${rsync_destination}\""
+                # Create the remote directory. Checked: an unreported mkdir failure
+                # surfaced later as a confusing rsync error blaming the transfer.
+                if [ "$rsync_type" = "incremental" ]; then
+                    # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
+                    if ! ssh "${remote_user}@${remote_server}" "mkdir -p \"${rsync_destination}\""; then
+                        unraid_notify "Failed to create remote backup directory: ${remote_user}@${remote_server}:${rsync_destination}" "failure"
+                        return 1
+                    fi
+                fi
                 # Rsync the snapshot to the remote destination with link-dest
-                #rsync -azvvv --delete $link_dest -e ssh "${snapshot_mount_point}/" "${remote_user}@${remote_server}:${rsync_destination}/"
-                echo "Executing remote rsync: rsync -azvh --delete $link_dest -e ssh \"${snapshot_mount_point}/\" \"${remote_user}@${remote_server}:${rsync_destination}/\""
-rsync -azvh --delete $link_dest -e ssh "${snapshot_mount_point}/" "${remote_user}@${remote_server}:${rsync_destination}/"
-
-                if [ $? -ne 0 ]; then
+                #rsync -azvvv --delete "${link_dest[@]}" -e ssh "${snapshot_mount_point}/" "${remote_user}@${remote_server}:${rsync_destination}/"
+                echo "Executing remote rsync: rsync -azvh --delete ${link_dest[*]} -e ssh \"${snapshot_mount_point}/\" \"${remote_user}@${remote_server}:${rsync_destination}/\""
+                if ! rsync -azvh --delete "${link_dest[@]}" -e ssh "${snapshot_mount_point}/" "${remote_user}@${remote_server}:${rsync_destination}/"; then
                     unraid_notify "Rsync replication failed from source: ${source_path} to remote destination: ${remote_user}@${remote_server}:${rsync_destination}" "failure"
                     return 1
                 fi
             else
                 # Ensure the backup directory exists
-                [ "$rsync_type" = "incremental" ] && mkdir -p "${rsync_destination}"
+                if [ "$rsync_type" = "incremental" ]; then
+                    if ! mkdir -p "${rsync_destination}"; then
+                        unraid_notify "Failed to create local backup directory: ${rsync_destination}" "failure"
+                        return 1
+                    fi
+                fi
                 # Rsync the snapshot to the local destination with link-dest
-              #  rsync -avv --delete $link_dest "${snapshot_mount_point}/" "${rsync_destination}/"
-              echo "Executing local rsync: rsync -avh --delete $link_dest \"${snapshot_mount_point}/\" \"${rsync_destination}/\""
-rsync -avh --delete $link_dest "${snapshot_mount_point}/" "${rsync_destination}/"
-
-                if [ $? -ne 0 ]; then
+              #  rsync -avv --delete "${link_dest[@]}" "${snapshot_mount_point}/" "${rsync_destination}/"
+              echo "Executing local rsync: rsync -avh --delete ${link_dest[*]} \"${snapshot_mount_point}/\" \"${rsync_destination}/\""
+                if ! rsync -avh --delete "${link_dest[@]}" "${snapshot_mount_point}/" "${rsync_destination}/"; then
                     unraid_notify "Rsync replication failed from source: ${source_path} to local destination: ${rsync_destination}" "failure"
                     return 1
                 fi
@@ -431,18 +463,21 @@ rsync -avh --delete $link_dest "${snapshot_mount_point}/" "${rsync_destination}/
         }
         #
         echo "making a temporary zfs snapshot for rsync"
-        zfs snapshot "${source_path}@${snapshot_name}"
-        if [ $? -ne 0 ]; then
+        if ! zfs snapshot "${source_path}@${snapshot_name}"; then
             unraid_notify "Failed to create ZFS snapshot for rsync: ${source_path}@${snapshot_name}" "failure"
             return 1
         fi
         #
+        # Track failures rather than returning early, so the temporary snapshots are
+        # always cleaned up. Previously every one of these results was discarded and
+        # the run reported success even when the transfer had failed.
+        local replication_failed=0
+        #
         local snapshot_mount_point="/mnt/${source_path}/.zfs/snapshot/${snapshot_name}"
-        do_rsync "${snapshot_mount_point}" "${destination}" ""
+        do_rsync "${snapshot_mount_point}" "${destination}" "" || replication_failed=1
         #
         echo "deleting temporary snapshot"
-        zfs destroy "${source_path}@${snapshot_name}"
-        if [ $? -ne 0 ]; then
+        if ! zfs destroy "${source_path}@${snapshot_name}"; then
             unraid_notify "Failed to delete ZFS snapshot after rsync: ${source_path}@${snapshot_name}" "failure"
             return 1
         fi
@@ -453,16 +488,28 @@ rsync -avh --delete $link_dest "${snapshot_mount_point}/" "${rsync_destination}/
         #
         for child_dataset in ${child_datasets}; do
             local relative_path
-            relative_path=$(echo "${child_dataset}" | sed "s|^${source_path}/||g")
+            relative_path="${child_dataset#"${source_path}/"}"
             echo "making a temporary zfs snapshot (child) for rsync"
-            zfs snapshot "${child_dataset}@${snapshot_name}"
+            if ! zfs snapshot "${child_dataset}@${snapshot_name}"; then
+                unraid_notify "Failed to create ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
+                replication_failed=1
+                continue
+            fi
             snapshot_mount_point="/mnt/${child_dataset}/.zfs/snapshot/${snapshot_name}"
             child_destination="${destination}/${relative_path}"
-            do_rsync "${snapshot_mount_point}" "${child_destination}" "/${relative_path}"
-            zfs destroy "${child_dataset}@${snapshot_name}"
+            do_rsync "${snapshot_mount_point}" "${child_destination}" "/${relative_path}" || replication_failed=1
+            # A leaked snapshot breaks the next run's snapshot of the same child.
+            if ! zfs destroy "${child_dataset}@${snapshot_name}"; then
+                unraid_notify "Failed to delete ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
+                replication_failed=1
+            fi
         done
         #
-        # Send a single success Unraid notification after all datasets (main and child) have been processed.
+        # Only report success once every dataset (main and child) actually succeeded.
+        if [ "$replication_failed" -ne 0 ]; then
+            unraid_notify "Rsync ${rsync_type} replication finished with errors for source: ${source_path} - backup at ${destination} is incomplete" "failure"
+            return 1
+        fi
         if [ "$destination_remote" = "yes" ]; then
             unraid_notify "Rsync ${rsync_type} replication was successful from source: ${source_path} to remote destination: ${remote_user}@${remote_server}:${destination}" "success"
         else
@@ -532,7 +579,7 @@ run_for_each_dataset() {
 
   # Perform pre-run checks, create sanoid configs, snapshot, prune, and replicate for each selected dataset.
   for source_dataset_name in "${selected_source_datasets[@]}"; do
-    update_paths $source_dataset_name
+    update_paths "$source_dataset_name"
     echo "Performing pre-run checks for $source_dataset_name"
     pre_run_checks
     echo "Creating sanoid config for $source_dataset_name"
@@ -540,13 +587,13 @@ run_for_each_dataset() {
   done
 
   for source_dataset_name in "${selected_source_datasets[@]}"; do
-    update_paths $source_dataset_name
+    update_paths "$source_dataset_name"
     echo "Performing autosnapshot for $source_dataset_name"
     autosnap
   done
 
   for source_dataset_name in "${selected_source_datasets[@]}"; do
-    update_paths $source_dataset_name
+    update_paths "$source_dataset_name"
     echo "Performing autoprune for $source_dataset_name"
     autoprune
     echo "Performing rsync replication for $source_dataset_name"
