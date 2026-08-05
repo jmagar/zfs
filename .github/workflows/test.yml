@@ -129,6 +129,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends zfsutils-linux bats
+      - name: Install bats test helpers
+        # The reusable system-integration.yml this job replaces assumed the
+        # self-hosted ci-pool-system/ci-cap-zfs runner image already had
+        # bats-support/bats-assert/bats-file pre-baked, so it never installed
+        # them. A vanilla ubuntu-latest runner doesn't have them; without
+        # this the "Integration tests" step fails at `load` before running
+        # a single real test.
+        run: CI=1 ./tests/setup.sh
       - name: Require capability
         run: |
           set -euo pipefail
