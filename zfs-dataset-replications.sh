@@ -165,6 +165,23 @@ pre_run_checks() {
     exit 1
   fi
   #
+  # Traversal is checked for local runs too: parent_destination_folder reaches
+  # `rsync --delete`, where a ".." component could delete outside the intended
+  # destination regardless of whether the destination is remote. Matched as a path
+  # component so legitimate names with consecutive periods (media..archive) pass.
+  local _traversal_check
+  for _traversal_check in "$parent_destination_folder" "$destination_pool" \
+                          "$parent_destination_dataset" "$source_pool" "$source_dataset"; do
+    case "$_traversal_check" in
+      ..|../*|*/../*|*/..)
+        msg="Error: destination settings may not contain a '..' path component: ${_traversal_check}"
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+        ;;
+    esac
+  done
+  #
   if [ "$destination_remote" = "yes" ]; then
     echo "Replication target is a remote server. I will check it is available..."
     # This script has no validation library, and these values are embedded into
@@ -186,16 +203,6 @@ pre_run_checks() {
           unraid_notify "$msg" "failure"
           exit 1
           ;;
-        *..*)
-          # parent_destination_folder also reaches `rsync --delete`, where a traversal
-          # component could delete outside the intended destination.
-          msg="Error: destination settings may not contain '..': ${_remote_unsafe}"
-          echo "$msg"
-          unraid_notify "$msg" "failure"
-          exit 1
-          ;;
-      esac
-      case "$_remote_unsafe" in
         *[[:cntrl:]]*)
           msg="Error: destination settings may not contain control characters: ${_remote_unsafe}"
           echo "$msg"
@@ -445,16 +452,31 @@ get_previous_backup() {
             local remote_listing=""
             local listing_status=0
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            remote_listing=$(ssh "${remote_user}@${remote_server}" "if [ ! -d \"${destination_rsync_location}\" ]; then exit 3; fi; ls -1 \"${destination_rsync_location}\"") || listing_status=$?
+            # Lists directories only: a date-shaped regular file would otherwise be
+            # accepted as a backup, and rsync exits 0 on a non-directory --link-dest.
+            # The trailing `exit 0` matters: with no subdirectories the loop's last
+            # test fails and the command would otherwise report failure for a
+            # perfectly valid empty destination.
+            remote_listing=$(ssh "${remote_user}@${remote_server}" "if [ ! -d \"${destination_rsync_location}\" ]; then exit 3; fi; cd \"${destination_rsync_location}\" || exit 4; for e in */; do [ -d \"\$e\" ] && printf '%s\n' \"\${e%/}\"; done; exit 0") || listing_status=$?
             if [ "$listing_status" -eq 0 ]; then
                 previous_backup=$(printf '%s\n' "${remote_listing}" | grep -E "${dated_re}" | sort -r | grep -vxF "${backup_date}" | head -n 1)
             elif [ "$listing_status" -ne 3 ]; then
                 echo "Warning: could not list previous backups on ${remote_server} (status ${listing_status}) - this run will be a full copy"
             fi
-        else
+        elif [ -d "${destination_rsync_location}" ]; then
             # -H follows a symlinked backup root the way ls does; -type d and the dated
-            # name pattern keep non-backup entries out of the candidate set.
-            previous_backup=$(find -H "${destination_rsync_location}" -mindepth 1 -maxdepth 1 -type d -name "${dated_glob}" -printf '%f\n' 2>/dev/null | sort -r | grep -vxF "${backup_date}" | head -n 1)
+            # name pattern keep non-backup entries out of the candidate set. The status
+            # is captured because -printf is GNU-only and an unreadable backup root
+            # would otherwise look identical to "no previous backup", silently
+            # downgrading every run to a full copy.
+            local find_output=""
+            local find_status=0
+            find_output=$(find -H "${destination_rsync_location}" -mindepth 1 -maxdepth 1 -type d -name "${dated_glob}" -printf '%f\n') || find_status=$?
+            if [ "$find_status" -eq 0 ]; then
+                previous_backup=$(printf '%s\n' "${find_output}" | sort -r | grep -vxF "${backup_date}" | head -n 1)
+            else
+                echo "Warning: could not list previous backups in ${destination_rsync_location} (status ${find_status}) - this run will be a full copy"
+            fi
         fi
     fi
 }
@@ -466,7 +488,12 @@ rsync_replication() {
     # everything this script ran afterwards, including later dataset iterations.
     local IFS=$'\n'
     if [ "$replication" = "rsync" ]; then
-        local snapshot_name="rsync_snapshot"
+        # Per-run unique, matching the Ubuntu script. With the old fixed name a
+        # snapshot leaked by an earlier run made `zfs snapshot` fail forever, and any
+        # attempt to clear it first risked destroying the snapshot of a concurrently
+        # running backup mid-transfer.
+        local snapshot_name
+        snapshot_name="rsync_snapshot_$(date +%s)"
         if [ "$rsync_type" = "incremental" ]; then
             backup_date=$(date +%Y-%m-%d_%H%M)
             destination="${destination_rsync_location}/${backup_date}"
@@ -576,16 +603,9 @@ rsync_replication() {
             relative_path="${child_dataset#"${source_path}/"}"
             echo "making a temporary zfs snapshot (child) for rsync"
             if ! zfs snapshot "${child_dataset}@${snapshot_name}"; then
-                # This script uses a fixed snapshot name, so a snapshot leaked by an
-                # earlier run makes this fail forever. Clear it and retry once rather
-                # than wedging the child permanently.
-                echo "Snapshot creation failed; clearing any leftover ${snapshot_name} and retrying"
-                zfs destroy "${child_dataset}@${snapshot_name}" 2>/dev/null
-                if ! zfs snapshot "${child_dataset}@${snapshot_name}"; then
-                    unraid_notify "Failed to create ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
-                    replication_failed=1
-                    continue
-                fi
+                unraid_notify "Failed to create ZFS snapshot for child dataset: ${child_dataset}@${snapshot_name}" "failure"
+                replication_failed=1
+                continue
             fi
             snapshot_mount_point="/mnt/${child_dataset}/.zfs/snapshot/${snapshot_name}"
             child_destination="${destination}/${relative_path}"

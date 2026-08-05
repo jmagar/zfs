@@ -453,20 +453,30 @@ get_previous_backup() {
             local remote_listing=""
             local listing_status=0
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            remote_listing=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "if [ ! -d '$current_destination_rsync_location' ]; then exit 3; fi; ls -1 '$current_destination_rsync_location'") || listing_status=$?
+            # Lists directories only: a date-shaped regular file would otherwise be
+            # accepted as a backup, and rsync exits 0 on a non-directory --link-dest.
+            # The trailing `exit 0` matters: with no subdirectories the loop's last
+            # test fails and the command would otherwise report failure for a
+            # perfectly valid empty destination.
+            remote_listing=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "if [ ! -d '$current_destination_rsync_location' ]; then exit 3; fi; cd '$current_destination_rsync_location' || exit 4; for e in */; do [ -d \"\$e\" ] && printf '%s\n' \"\${e%/}\"; done; exit 0") || listing_status=$?
             if [[ "$listing_status" -eq 0 ]]; then
                 previous_backup=$(printf '%s\n' "$remote_listing" | grep -E "$dated_re" | sort -r | grep -vxF "$backup_date" | head -n 1)
             elif [[ "$listing_status" -ne 3 ]]; then
                 log_message "WARNING" "Could not list previous backups on ${REMOTE_SERVER} (status ${listing_status}) - proceeding without --link-dest, so this run will be a full copy" >&2
             fi
-        else
-            if [[ -d "$current_destination_rsync_location" ]]; then
-                # -H follows a symlinked backup root the way ls does; -type d and the
-                # dated name pattern keep non-backup entries out of the candidate set.
-                # Errors are deliberately not suppressed: -printf is GNU-only, and
-                # swallowing that failure would look identical to "no previous backup"
-                # and silently downgrade every run to a full copy.
-                previous_backup=$(find -H "$current_destination_rsync_location" -mindepth 1 -maxdepth 1 -type d -name "$dated_glob" -printf '%f\n' | sort -r | grep -vxF "$backup_date" | head -n 1)
+        elif [[ -d "$current_destination_rsync_location" ]]; then
+            # -H follows a symlinked backup root the way ls does; -type d and the dated
+            # name pattern keep non-backup entries out of the candidate set. The status
+            # is captured because -printf is GNU-only and an unreadable backup root
+            # would otherwise look identical to "no previous backup", silently
+            # downgrading every run to a full copy.
+            local find_output=""
+            local find_status=0
+            find_output=$(find -H "$current_destination_rsync_location" -mindepth 1 -maxdepth 1 -type d -name "$dated_glob" -printf '%f\n') || find_status=$?
+            if [[ "$find_status" -eq 0 ]]; then
+                previous_backup=$(printf '%s\n' "$find_output" | sort -r | grep -vxF "$backup_date" | head -n 1)
+            else
+                log_message "WARNING" "Could not list previous backups in $current_destination_rsync_location (status ${find_status}) - proceeding without --link-dest, so this run will be a full copy" >&2
             fi
         fi
     fi
