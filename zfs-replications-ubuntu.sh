@@ -444,13 +444,20 @@ get_previous_backup() {
     local dated_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$'
     if [[ "$RSYNC_TYPE" == "incremental" ]]; then
         if [[ "$DESTINATION_REMOTE" == "yes" ]]; then
-            # A non-zero status here means ssh could not reach the host, which is worth
-            # reporting: silently returning "" makes an unreachable remote look like an
-            # empty backup directory and quietly downgrades the run to a full copy.
+            # The remote side runs no pipeline, so ssh reports ls's own status rather
+            # than head's; filtering happens locally. Exit 3 means the destination does
+            # not exist yet, which is normal on a first run. Any other non-zero is a
+            # real failure -- an unreadable or unmounted destination would otherwise be
+            # indistinguishable from "no previous backup" and would silently downgrade
+            # every run to a full copy.
+            local remote_listing=""
+            local listing_status=0
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            if ! previous_backup=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "ls '$current_destination_rsync_location' 2>/dev/null | grep -E '$dated_re' | sort -r | grep -vxF '$backup_date' | head -n 1"); then
-                log_message "WARNING" "Could not reach ${REMOTE_SERVER} to list previous backups - proceeding without --link-dest (this run will be a full copy)" >&2
-                previous_backup=""
+            remote_listing=$(ssh "${REMOTE_USER}@${REMOTE_SERVER}" "if [ ! -d '$current_destination_rsync_location' ]; then exit 3; fi; ls -1 '$current_destination_rsync_location'") || listing_status=$?
+            if [[ "$listing_status" -eq 0 ]]; then
+                previous_backup=$(printf '%s\n' "$remote_listing" | grep -E "$dated_re" | sort -r | grep -vxF "$backup_date" | head -n 1)
+            elif [[ "$listing_status" -ne 3 ]]; then
+                log_message "WARNING" "Could not list previous backups on ${REMOTE_SERVER} (status ${listing_status}) - proceeding without --link-dest, so this run will be a full copy" >&2
             fi
         else
             if [[ -d "$current_destination_rsync_location" ]]; then
@@ -520,13 +527,10 @@ rsync_replication() {
                 fi
             fi
             
-            # Perform remote rsync
-            if [[ "$DRY_RUN" != "yes" ]]; then
-                rsync -azvh --delete "${link_dest[@]}" -e ssh "$snapshot_mount_point/" "${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/"
-            else
-                log_message "INFO" "DRY RUN: Would run rsync -azvh --delete ${link_dest[*]} -e ssh '$snapshot_mount_point/' '${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/'"
-                return 0
-            fi
+            # Perform remote rsync. No DRY_RUN branch here: the whole body of
+            # rsync_replication is already gated on DRY_RUN, so do_rsync is never
+            # reached in a dry run and the branch that used to sit here was dead.
+            rsync -azvh --delete "${link_dest[@]}" -e ssh "$snapshot_mount_point/" "${REMOTE_USER}@${REMOTE_SERVER}:$rsync_destination/"
         else
             # Create local directory if incremental
             if [[ "$RSYNC_TYPE" == "incremental" ]]; then
@@ -536,13 +540,8 @@ rsync_replication() {
                 fi
             fi
             
-            # Perform local rsync
-            if [[ "$DRY_RUN" != "yes" ]]; then
-                rsync -avh --delete "${link_dest[@]}" "$snapshot_mount_point/" "$rsync_destination/"
-            else
-                log_message "INFO" "DRY RUN: Would run rsync -avh --delete ${link_dest[*]} '$snapshot_mount_point/' '$rsync_destination/'"
-                return 0
-            fi
+            # Perform local rsync (see the note above about the removed DRY_RUN branch)
+            rsync -avh --delete "${link_dest[@]}" "$snapshot_mount_point/" "$rsync_destination/"
         fi
     }
     
@@ -642,6 +641,17 @@ rsync_replication() {
         log_message "SUCCESS" "$msg"
     else
         log_message "INFO" "DRY RUN: Would perform rsync replication for $current_source_path"
+        log_message "INFO" "DRY RUN: destination would be $destination"
+        # Report the --link-dest decision. A dry run that does not show this cannot
+        # be used to check the thing most likely to be wrong: silently losing
+        # --link-dest turns every incremental into a full copy without any error.
+        local dry_previous_backup
+        dry_previous_backup=$(get_previous_backup)
+        if [[ -n "$dry_previous_backup" ]]; then
+            log_message "INFO" "DRY RUN: would hardlink unchanged files against $current_destination_rsync_location/$dry_previous_backup"
+        elif [[ "$RSYNC_TYPE" == "incremental" ]]; then
+            log_message "INFO" "DRY RUN: no previous backup found - this run would be a full copy"
+        fi
     fi
 }
 

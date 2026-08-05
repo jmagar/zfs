@@ -365,13 +365,14 @@ validate_config() {
             echo "ERROR: Invalid PARENT_DESTINATION_FOLDER: $PARENT_DESTINATION_FOLDER" >&2
             errors=$((errors + 1))
         fi
-        # This value is embedded into quoted remote commands sent over ssh, so a
-        # quote, backslash, backtick or $ in it would break out of that quoting and
-        # run on the remote host. validate_path deliberately allows spaces and
-        # parentheses (real bind-mount paths contain them), so check the narrow set
-        # that can actually escape here rather than widening validate_path itself.
-        if [[ "$DESTINATION_REMOTE" == "yes" && "$PARENT_DESTINATION_FOLDER" == *[\'\"\`\$\\]* ]]; then
-            echo "ERROR: PARENT_DESTINATION_FOLDER may not contain quotes, backslashes, backticks or \$ when replicating to a remote host: $PARENT_DESTINATION_FOLDER" >&2
+        # This value is embedded into quoted remote commands sent over ssh, so shell
+        # metacharacters in it could break out of that quoting and run on the remote
+        # host. validate_path deliberately allows spaces and parentheses (real
+        # bind-mount paths contain them), so check here rather than widening
+        # validate_path itself. The set is wider than what can escape today's quoting,
+        # so the guard stays valid if a future edit changes a surrounding quote.
+        if [[ "$DESTINATION_REMOTE" == "yes" && "$PARENT_DESTINATION_FOLDER" == *[\'\"\`\$\\\;\&\|\<\>]* ]]; then
+            echo "ERROR: PARENT_DESTINATION_FOLDER may not contain shell metacharacters when replicating to a remote host: $PARENT_DESTINATION_FOLDER" >&2
             errors=$((errors + 1))
         fi
         if ! validate_choice "$RSYNC_TYPE" "RSYNC_TYPE" "incremental" "mirror" 2>/dev/null; then
@@ -388,10 +389,18 @@ validate_config() {
         if [[ -z "$REMOTE_USER" ]]; then
             echo "ERROR: REMOTE_USER must be set when remote destination is enabled" >&2
             errors=$((errors + 1))
+        # ssh takes "user@host" as a single argv element, so a leading '-' would be
+        # parsed as an ssh option (e.g. -oProxyCommand=...) rather than a destination.
+        elif [[ "$REMOTE_USER" == -* || "$REMOTE_USER" == *[\'\"\`\$\\\;\&\|\<\>]* ]]; then
+            echo "ERROR: REMOTE_USER must not begin with '-' or contain shell metacharacters: $REMOTE_USER" >&2
+            errors=$((errors + 1))
         fi
 
         if [[ -z "$REMOTE_SERVER" ]]; then
             echo "ERROR: REMOTE_SERVER must be set when remote destination is enabled" >&2
+            errors=$((errors + 1))
+        elif [[ "$REMOTE_SERVER" == -* ]]; then
+            echo "ERROR: REMOTE_SERVER must not begin with '-': $REMOTE_SERVER" >&2
             errors=$((errors + 1))
         elif ! validate_host "$REMOTE_SERVER" 2>/dev/null; then
             errors=$((errors + 1))

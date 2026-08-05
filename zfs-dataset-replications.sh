@@ -173,18 +173,55 @@ pre_run_checks() {
     # source_pool/source_dataset are included because update_paths builds
     # destination_rsync_location out of them, and that value is interpolated into a
     # remotely double-quoted word where $ and backticks are still live.
+    # The shell-metacharacter set is deliberately wider than the characters that can
+    # escape the quoting used today: it keeps the guard valid if a future edit changes
+    # or drops a surrounding quote at one of the ssh call sites.
     local _remote_unsafe
     for _remote_unsafe in "$parent_destination_folder" "$destination_pool" \
                           "$parent_destination_dataset" "$source_pool" "$source_dataset"; do
       case "$_remote_unsafe" in
-        *[\'\"\`\$\\]*)
-          msg="Error: destination settings may not contain quotes, backslashes, backticks or \$ when replicating to a remote host: ${_remote_unsafe}"
+        *[\'\"\`\$\\\;\&\|\<\>]*)
+          msg="Error: destination settings may not contain shell metacharacters when replicating to a remote host: ${_remote_unsafe}"
+          echo "$msg"
+          unraid_notify "$msg" "failure"
+          exit 1
+          ;;
+        *..*)
+          # parent_destination_folder also reaches `rsync --delete`, where a traversal
+          # component could delete outside the intended destination.
+          msg="Error: destination settings may not contain '..': ${_remote_unsafe}"
+          echo "$msg"
+          unraid_notify "$msg" "failure"
+          exit 1
+          ;;
+      esac
+      case "$_remote_unsafe" in
+        *[[:cntrl:]]*)
+          msg="Error: destination settings may not contain control characters: ${_remote_unsafe}"
           echo "$msg"
           unraid_notify "$msg" "failure"
           exit 1
           ;;
       esac
     done
+    # ssh takes "user@host" as a single argv element, so a leading '-' would be parsed
+    # as an ssh option (e.g. -oProxyCommand=...) rather than a destination.
+    case "${remote_user}" in
+      -*|*[\'\"\`\$\\\;\&\|\<\>[:cntrl:]]*)
+        msg="Error: remote_user must not begin with '-' or contain shell metacharacters: ${remote_user}"
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+        ;;
+    esac
+    case "${remote_server}" in
+      -*|*[\'\"\`\$\\\;\&\|\<\>[:cntrl:]]*)
+        msg="Error: remote_server must not begin with '-' or contain shell metacharacters: ${remote_server}"
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+        ;;
+    esac
     # Attempt an SSH connection. If it fails, print an error message and exit.
     if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" echo 'SSH connection successful' &>/dev/null; then
       msg='SSH connection failed. Please check your remote server details and ensure ssh keys are exchanged.'
@@ -398,11 +435,21 @@ get_previous_backup() {
         local dated_glob='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9]'
         local dated_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$'
         if [ "$destination_remote" = "yes" ]; then
-            echo "Running: ssh ${remote_user}@${remote_server} \"ls ${destination_rsync_location} | grep -E ${dated_re} | sort -r | grep -vxF ${backup_date} | head -n 1\""
+            echo "Listing previous backups on ${remote_user}@${remote_server}:${destination_rsync_location}"
+            # The remote side runs no pipeline, so ssh reports ls's own status rather
+            # than head's; filtering happens locally. Exit 3 means the destination does
+            # not exist yet, which is normal on a first run. Any other non-zero is a
+            # real failure -- an unreadable or unmounted destination would otherwise be
+            # indistinguishable from "no previous backup" and would silently downgrade
+            # every run to a full copy.
+            local remote_listing=""
+            local listing_status=0
             # shellcheck disable=SC2029 # client-side expansion is intended: the destination path only exists locally
-            if ! previous_backup=$(ssh "${remote_user}@${remote_server}" "ls \"${destination_rsync_location}\" | grep -E \"${dated_re}\" | sort -r | grep -vxF \"${backup_date}\" | head -n 1"); then
-                echo "Warning: could not reach ${remote_server} to list previous backups - this run will be a full copy"
-                previous_backup=""
+            remote_listing=$(ssh "${remote_user}@${remote_server}" "if [ ! -d \"${destination_rsync_location}\" ]; then exit 3; fi; ls -1 \"${destination_rsync_location}\"") || listing_status=$?
+            if [ "$listing_status" -eq 0 ]; then
+                previous_backup=$(printf '%s\n' "${remote_listing}" | grep -E "${dated_re}" | sort -r | grep -vxF "${backup_date}" | head -n 1)
+            elif [ "$listing_status" -ne 3 ]; then
+                echo "Warning: could not list previous backups on ${remote_server} (status ${listing_status}) - this run will be a full copy"
             fi
         else
             # -H follows a symlinked backup root the way ls does; -type d and the dated
@@ -501,6 +548,14 @@ rsync_replication() {
         if ! zfs destroy "${source_path}@${snapshot_name}"; then
             unraid_notify "Failed to delete ZFS snapshot after rsync: ${source_path}@${snapshot_name}" "failure"
             cleanup_failed=1
+        fi
+        #
+        # A failed parent rsync almost always means the destination is full, unmounted
+        # or unreachable, so attempting every child against it just wastes time and
+        # leaves a half-written generation. Stop here, as the Ubuntu script does.
+        if [ "$replication_failed" -ne 0 ]; then
+            unraid_notify "Rsync ${rsync_type} replication failed for source: ${source_path} - child datasets were skipped and the backup at ${destination} is incomplete" "failure"
+            return 1
         fi
         #
         # Replication for child sub-datasets
