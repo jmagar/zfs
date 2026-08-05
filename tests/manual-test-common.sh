@@ -9,7 +9,6 @@ set -e
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,7 +29,7 @@ test_result() {
 
     TESTS_RUN=$((TESTS_RUN + 1))
 
-    if [ $status -eq 0 ]; then
+    if [ "$status" -eq 0 ]; then
         echo -e "${GREEN}✓${NC} $test_name"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -45,6 +44,7 @@ echo "========================================"
 echo ""
 
 # Source the library
+# shellcheck disable=SC1091 # runtime-resolved library, linted separately
 source "$SCRIPT_DIR/lib/zfs-common.sh"
 
 echo "Testing log_message function..."
@@ -52,15 +52,15 @@ echo "----------------------------------------"
 
 # Test 1: log_message creates log file
 log_message "INFO" "Test message"
-[ -f "$LOG_FILE" ] && grep -q "Test message" "$LOG_FILE"
-test_result "log_message creates log file and writes message" $?
+if [ -f "$LOG_FILE" ] && grep -q "Test message" "$LOG_FILE"; then status=0; else status=1; fi
+test_result "log_message creates log file and writes message" "$status"
 
 # Test 2: log_message handles different levels
 log_message "WARNING" "Warning test"
 log_message "ERROR" "Error test"
 log_message "SUCCESS" "Success test"
-grep -q "\[WARNING\]" "$LOG_FILE" && grep -q "\[ERROR\]" "$LOG_FILE" && grep -q "\[SUCCESS\]" "$LOG_FILE"
-test_result "log_message handles different log levels" $?
+if grep -q "\[WARNING\]" "$LOG_FILE" && grep -q "\[ERROR\]" "$LOG_FILE" && grep -q "\[SUCCESS\]" "$LOG_FILE"; then status=0; else status=1; fi
+test_result "log_message handles different log levels" "$status"
 
 echo ""
 echo "Testing normalize_name function..."
@@ -68,16 +68,16 @@ echo "----------------------------------------"
 
 # Test 3: normalize_name with umlauts
 result=$(normalize_name "Müller")
-[ "$result" = "Mueller" ]
-test_result "normalize_name converts ü to ue" $?
+if [ "$result" = "Mueller" ]; then status=0; else status=1; fi
+test_result "normalize_name converts ü to ue" "$status"
 
 result=$(normalize_name "Größe")
-[ "$result" = "Groesse" ]
-test_result "normalize_name converts ö to oe" $?
+if [ "$result" = "Groesse" ]; then status=0; else status=1; fi
+test_result "normalize_name converts ö to oe" "$status"
 
 result=$(normalize_name "Straße")
-[ "$result" = "Strasse" ]
-test_result "normalize_name converts ß to ss" $?
+if [ "$result" = "Strasse" ]; then status=0; else status=1; fi
+test_result "normalize_name converts ß to ss" "$status"
 
 echo ""
 echo "Testing format_bytes function..."
@@ -85,20 +85,20 @@ echo "----------------------------------------"
 
 # Test 4: format_bytes
 result=$(format_bytes "512")
-[ "$result" = "512B" ]
-test_result "format_bytes handles bytes" $?
+if [ "$result" = "512B" ]; then status=0; else status=1; fi
+test_result "format_bytes handles bytes" "$status"
 
 result=$(format_bytes "2048")
-[ "$result" = "2K" ]
-test_result "format_bytes converts to kilobytes" $?
+if [ "$result" = "2K" ]; then status=0; else status=1; fi
+test_result "format_bytes converts to kilobytes" "$status"
 
 result=$(format_bytes "2097152")
-[ "$result" = "2M" ]
-test_result "format_bytes converts to megabytes" $?
+if [ "$result" = "2M" ]; then status=0; else status=1; fi
+test_result "format_bytes converts to megabytes" "$status"
 
 result=$(format_bytes "2147483648")
-[ "$result" = "2G" ]
-test_result "format_bytes converts to gigabytes" $?
+if [ "$result" = "2G" ]; then status=0; else status=1; fi
+test_result "format_bytes converts to gigabytes" "$status"
 
 echo ""
 echo "Testing parse_size_to_bytes function..."
@@ -106,20 +106,20 @@ echo "----------------------------------------"
 
 # Test 5: parse_size_to_bytes
 result=$(parse_size_to_bytes "1K")
-[ "$result" = "1024" ]
-test_result "parse_size_to_bytes converts kilobytes" $?
+if [ "$result" = "1024" ]; then status=0; else status=1; fi
+test_result "parse_size_to_bytes converts kilobytes" "$status"
 
 result=$(parse_size_to_bytes "1M")
-[ "$result" = "1048576" ]
-test_result "parse_size_to_bytes converts megabytes" $?
+if [ "$result" = "1048576" ]; then status=0; else status=1; fi
+test_result "parse_size_to_bytes converts megabytes" "$status"
 
 result=$(parse_size_to_bytes "1G")
-[ "$result" = "1073741824" ]
-test_result "parse_size_to_bytes converts gigabytes" $?
+if [ "$result" = "1073741824" ]; then status=0; else status=1; fi
+test_result "parse_size_to_bytes converts gigabytes" "$status"
 
 result=$(parse_size_to_bytes "12345")
-[ "$result" = "12345" ]
-test_result "parse_size_to_bytes handles plain numbers" $?
+if [ "$result" = "12345" ]; then status=0; else status=1; fi
+test_result "parse_size_to_bytes handles plain numbers" "$status"
 
 echo ""
 echo "Testing ensure_directory function..."
@@ -127,28 +127,26 @@ echo "----------------------------------------"
 
 # Test 6: ensure_directory
 test_dir="$TEST_TEMP_DIR/new_test_dir"
-ensure_directory "$test_dir" >/dev/null 2>&1
-[ -d "$test_dir" ]
-test_result "ensure_directory creates directory" $?
+# Inside the condition: as a bare statement under set -e a failing ensure_directory
+# aborts the script before test_result can record the failure.
+if ensure_directory "$test_dir" >/dev/null 2>&1 && [ -d "$test_dir" ]; then status=0; else status=1; fi
+test_result "ensure_directory creates directory" "$status"
 
 test_dir="$TEST_TEMP_DIR/nested/path/dir"
-ensure_directory "$test_dir" >/dev/null 2>&1
-[ -d "$test_dir" ]
-test_result "ensure_directory creates nested directories" $?
+if ensure_directory "$test_dir" >/dev/null 2>&1 && [ -d "$test_dir" ]; then status=0; else status=1; fi
+test_result "ensure_directory creates nested directories" "$status"
 
 echo ""
 echo "Testing require_root function..."
 echo "----------------------------------------"
 
-# Test 7: require_root (will fail if not root)
-if [ $EUID -ne 0 ]; then
-    require_root >/dev/null 2>&1
-    [ $? -eq 1 ]
-    test_result "require_root returns error for non-root" $?
+# Test 7: require_root (expected to report failure when not root)
+if [ "$EUID" -ne 0 ]; then
+    if require_root >/dev/null 2>&1; then status=1; else status=0; fi
+    test_result "require_root returns error for non-root" "$status"
 else
-    require_root >/dev/null 2>&1
-    [ $? -eq 0 ]
-    test_result "require_root succeeds for root" $?
+    if require_root >/dev/null 2>&1; then status=0; else status=1; fi
+    test_result "require_root succeeds for root" "$status"
 fi
 
 echo ""
@@ -156,19 +154,19 @@ echo "Testing function exports..."
 echo "----------------------------------------"
 
 # Test 8: Check all functions are available
-declare -F log_message >/dev/null && \
-declare -F rotate_log >/dev/null && \
-declare -F send_notification >/dev/null && \
-declare -F is_zfs_dataset >/dev/null && \
-declare -F get_dataset_for_path >/dev/null && \
-declare -F normalize_name >/dev/null && \
-declare -F format_bytes >/dev/null && \
-declare -F parse_size_to_bytes >/dev/null && \
-declare -F require_root >/dev/null && \
-declare -F ensure_directory >/dev/null && \
-declare -F get_dataset_available_space >/dev/null && \
-declare -F get_dataset_used_space >/dev/null
-test_result "All functions are exported and available" $?
+if declare -F log_message >/dev/null && \
+   declare -F rotate_log >/dev/null && \
+   declare -F send_notification >/dev/null && \
+   declare -F is_zfs_dataset >/dev/null && \
+   declare -F get_dataset_for_path >/dev/null && \
+   declare -F normalize_name >/dev/null && \
+   declare -F format_bytes >/dev/null && \
+   declare -F parse_size_to_bytes >/dev/null && \
+   declare -F require_root >/dev/null && \
+   declare -F ensure_directory >/dev/null && \
+   declare -F get_dataset_available_space >/dev/null && \
+   declare -F get_dataset_used_space >/dev/null; then status=0; else status=1; fi
+test_result "All functions are exported and available" "$status"
 
 echo ""
 echo "========================================"

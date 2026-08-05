@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+`CLAUDE.md` is the agent-memory source of truth. `AGENTS.md` and `GEMINI.md`
+must remain sibling symlinks to this file; never edit those symlinks directly.
+
 ## Repository Overview
 
 This is a collection of ZFS management scripts with two versions:

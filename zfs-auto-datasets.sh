@@ -116,7 +116,7 @@ stop_docker_containers() {
       local container_name
       container_name=$(docker container inspect --format '{{.Name}}' "$container" | cut -c 2-)
       local bindmounts
-      bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' $container)
+      bindmounts=$(docker inspect --format '{{ range .Mounts }}{{ if eq .Type "bind" }}{{ .Source }}{{printf "\n"}}{{ end }}{{ end }}' "$container")
       
       if [ -z "$bindmounts" ]; then
         echo "Container ${container_name} has no bind mounts so nothing to convert. No need to stop the container."
@@ -127,11 +127,27 @@ stop_docker_containers() {
 
       while IFS= read -r bindmount; do
         if [[ "$bindmount" == /mnt/user/* ]]; then
-            bindmount=$(find_real_location "$bindmount")
-            if [[ $? -ne 0 ]]; then
-                echo "Error finding real location for $bindmount in container $container_name."
+            # Resolve into a separate variable: assigning straight to $bindmount
+            # overwrote it with find_real_location's error text, so the message below
+            # reported that text instead of naming the path that actually failed.
+            # Status 1 means the path does not exist, so there is nothing there to
+            # convert and skipping is safe. Any other failure means the path exists
+            # but could not be located on a real disk -- we cannot tell whether it is
+            # about to be converted, so fail safe and stop the container. Stopping one
+            # unnecessarily is recoverable (it is restarted afterwards); converting
+            # appdata under a running container is not.
+            local resolved_bindmount
+            local resolve_status=0
+            resolved_bindmount=$(find_real_location "$bindmount") || resolve_status=$?
+            if [ "$resolve_status" -eq 1 ]; then
+                echo "Bind mount $bindmount for container $container_name does not exist; skipping it."
                 continue
+            elif [ "$resolve_status" -ne 0 ]; then
+                echo "Could not resolve the real location of $bindmount for container $container_name; stopping the container as a precaution."
+                stop_container=true
+                break
             fi
+            bindmount="$resolved_bindmount"
         fi
 
         # check if bind mount matches source_path_appdata, if not, skip it
@@ -152,8 +168,14 @@ stop_docker_containers() {
       done <<< "$bindmounts"  #  send  bindmounts into the loop
 
       if [ "$stop_container" = true ]; then
-        docker stop "$container"
-        stopped_containers+=("$container_name")
+        # Guarded: start_docker_containers only restarts when dry_run is not "yes", so
+        # an unguarded stop here left containers down after a dry run.
+        if [ "$dry_run" != "yes" ]; then
+          docker stop "$container"
+          stopped_containers+=("$container_name")
+        else
+          echo "Dry Run: Docker container ${container_name} would be stopped"
+        fi
       else
         echo "Container ${container_name} is not required to be stopped as it is already a separate dataset."
       fi
@@ -219,6 +241,36 @@ get_vm_disk() {
 
 #-----------------------------------------------------------------------------------------------------------------------------------  
 # this function checks the vdisks any running vm. If visks is not inside a dataset it will stop the vm for processing the conversion
+# Shuts a VM down for conversion and records it for restart afterwards. Extracted so
+# both the "vdisk is a folder" path and the "vdisk could not be resolved" path stop
+# the VM, rather than the latter leaving it running while its vdisk is converted.
+shutdown_vm_for_conversion() {
+  local vm="$1"
+
+  if [ "$dry_run" != "yes" ]; then
+    virsh shutdown "$vm"
+
+    # waiting loop for the VM to shutdown
+    local start_time
+    start_time=$(date +%s)
+    while virsh dominfo "$vm" | grep -q 'running'; do
+      sleep 5
+      local current_time
+      current_time=$(date +%s)
+      if (( current_time - start_time >= vm_forceshutdown_wait )); then
+        echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
+        virsh destroy "$vm"
+        break
+      fi
+    done
+    stopped_vms+=("$vm")
+  else
+    # Not recorded in a dry run: nothing was stopped, so claiming it was (and that it
+    # will be restarted) would be untrue, the same way containers are handled.
+    echo "Dry Run: VM $vm would be stopped"
+  fi
+}
+#----------------------------------------------------------------------------------
 stop_virtual_machines() {
   if [ "$should_process_vms" = "yes" ]; then
     echo "Checking running VMs..."
@@ -240,11 +292,30 @@ stop_virtual_machines() {
       
       # Check if VM disk is in a folder and matches source_path_vms
       if [[ "$vm_disk" == /mnt/user/* ]]; then
-          vm_disk=$(find_real_location "$vm_disk")
-          if [[ $? -ne 0 ]]; then
-              echo "Error finding real location for $vm_disk in VM $vm."
+          # Resolve into a separate variable: assigning straight to $vm_disk
+          # overwrote it with find_real_location's error text, so the message below
+          # reported that text instead of naming the path that actually failed.
+          # Status 1 means the path does not exist, so there is nothing there to
+          # convert and skipping is safe. Any other failure means the vdisk exists but
+          # could not be located on a real disk, so this VM cannot be checked -- if it
+          # does live under source_path_vms it will be left running while its vdisk is
+          # converted. That is called out loudly rather than skipped silently.
+          local resolved_vm_disk
+          local vm_resolve_status=0
+          resolved_vm_disk=$(find_real_location "$vm_disk") || vm_resolve_status=$?
+          if [ "$vm_resolve_status" -eq 1 ]; then
+              echo "vdisk $vm_disk for VM $vm does not exist; skipping it."
+              continue
+          elif [ "$vm_resolve_status" -ne 0 ]; then
+              # Fail safe: the vdisk exists but cannot be located, so we cannot tell
+              # whether it is about to be converted. Stopping a VM unnecessarily is
+              # recoverable -- it is restarted afterwards -- converting a vdisk that is
+              # still in use is not.
+              echo "Could not resolve the real location of $vm_disk for VM $vm; stopping the VM as a precaution."
+              shutdown_vm_for_conversion "$vm"
               continue
           fi
+          vm_disk="$resolved_vm_disk"
       fi
 
       # Check if vm_disk matches source_path_vms, if not, skip it
@@ -261,27 +332,7 @@ stop_virtual_machines() {
       is_zfs_dataset "$combined_path"
       if [[ $? -eq 1 ]]; then
         echo "The vdisk for VM ${vm} is not a ZFS dataset (it's a folder). VM will be stopped so it can be converted to a dataset."
-        
-        if [ "$dry_run" != "yes" ]; then
-            virsh shutdown "$vm"  
-            
-      #  waiting loop for the VM to shutdown
-      local start_time
-      start_time=$(date +%s)
-      while virsh dominfo "$vm" | grep -q 'running'; do
-    sleep 5
-    local current_time
-    current_time=$(date +%s)
-    if (( current_time - start_time >= $vm_forceshutdown_wait )); then
-        echo "VM $vm has not shut down after $vm_forceshutdown_wait seconds. Forcing shutdown now."
-        virsh destroy "$vm"
-        break
-    fi
-done
-        else
-            echo "Dry Run: VM $vm would be stopped"
-        fi
-        stopped_vms+=("$vm")
+        shutdown_vm_for_conversion "$vm"
       else
         echo "VM ${vm} is not required to be stopped as its vdisk is already in its own dataset."
       fi
@@ -334,7 +385,8 @@ create_datasets() {
       base_entry_no_spaces=$(if [ "$replace_spaces" = "yes" ]; then echo "$base_entry" | tr ' ' '_'; else echo "$base_entry"; fi)
       normalized_base_entry=$(normalize_name "$base_entry_no_spaces")
       
-      if zfs list -o name | grep -qE "^${source_path}/${normalized_base_entry}$"; then
+      # -xF for the same reason as above: the name is data, not a pattern.
+      if zfs list -o name | grep -qxF "${source_path}/${normalized_base_entry}"; then
         echo "Skipping dataset ${entry}..."
       elif [ -d "$entry" ]; then
         echo "Processing folder ${entry}..."
@@ -431,7 +483,10 @@ can_i_go_to_work() {
         local current_source_folder_count=0
         for entry in "${mount_point}/${source_path}"/*; do
             base_entry=$(basename "$entry")
-            if [ -d "$entry" ] && ! zfs list -o name | grep -q "^${source_path}/$(echo "$base_entry")$"; then
+            # -xF: a folder name is matched literally against a whole line. As a regex,
+            # a name like media.v1 would also match an unrelated dataset mediaXv1 and
+            # the required conversion would be skipped.
+            if [ -d "$entry" ] && ! zfs list -o name | grep -qxF "${source_path}/${base_entry}"; then
 
                 current_source_folder_count=$((current_source_folder_count + 1))
             fi

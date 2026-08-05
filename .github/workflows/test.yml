@@ -1,278 +1,204 @@
 name: Test ZFS Scripts
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-      - 'feature/**'
-      - 'integration/**'
   pull_request:
-    branches:
-      - main
-      - develop
+    branches: [main, develop]
+  push:
+    branches: [main, develop, "feature/**", "integration/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
 
-env:
-  DEBIAN_FRONTEND: noninteractive
+concurrency:
+  group: zfs-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  shellcheck:
-    name: ShellCheck
+  # NOTE: this job used to call the fleet's
+  # dinglebear-ai/workflows/.github/workflows/fast-ops.yml reusable workflow,
+  # which hardcodes `runs-on: [self-hosted, ci-pool-ops]` with no input to
+  # override the runner. jmagar/zfs has zero self-hosted runners registered
+  # (see PR #6 discussion), so that call would queue forever. Inlined here on
+  # ubuntu-latest, mirroring fast-ops.yml's steps exactly. Restore the
+  # `uses:` call once ci-pool-ops runners exist for this repo.
+  shell:
+    name: Shell lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run ShellCheck on main scripts
-        uses: ludeeus/action-shellcheck@master
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          scandir: '.'
-          ignore_paths: 'tests'
-          severity: warning
-          format: gcc
-          additional_files: '*.sh'
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Install pinned actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+      - run: actionlint
+      - name: ShellCheck and parse shell
+        env:
+          SHELL_GLOBS: "*.sh lib/*.sh"
+        run: |
+          set -euo pipefail
+          read -r -a shell_globs <<< "$SHELL_GLOBS"
+          mapfile -d '' files < <(git ls-files -z -- "${shell_globs[@]}")
+          ((${#files[@]} == 0)) && exit 0
+          shellcheck "${files[@]}"
+          for file in "${files[@]}"; do bash -n "$file"; done
 
-      - name: ShellCheck Summary
-        if: always()
-        run: echo "ShellCheck completed"
-
+  # NOTE: retargeted from [self-hosted, ci-pool-ops] to ubuntu-latest for the
+  # same zero-runners reason as the `shell` job above. This job is
+  # non-privileged (bats + MOCK_ZFS), so ubuntu-latest is a safe fallback.
   unit-tests:
-    name: Unit Tests
+    name: Unit and mocked integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install test runtime
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq git curl jq
-          # Install bats from source (newer version doesn't exit 1 on skipped tests)
-          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
-          sudo /tmp/bats/install.sh /usr/local
-
-      - name: Setup test environment
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bats git curl jq
+          CI=1 ./tests/setup.sh
+      - name: Unit tests
         run: |
-          if [[ ! -f tests/setup.sh ]]; then
-            echo "tests/setup.sh not found — skipping test environment setup"
-            exit 0
-          fi
-          chmod +x tests/setup.sh
-          ./tests/setup.sh
-
-      - name: List test files
-        run: |
-          echo "=== Test files ==="
-          find tests -name "*.bats" -type f
-
-      - name: Run unit tests
-        run: |
-          echo "=== Running Unit Tests ==="
-          if ls tests/test-*.bats 1> /dev/null 2>&1; then
-            set +e
-            bats --print-output-on-failure tests/test-*.bats 2>&1 | tee /tmp/bats-output.txt
-            bats_exit=${PIPESTATUS[0]}
-            set -e
-            if [[ $bats_exit -ne 0 ]]; then
-              if grep -q '^not ok' /tmp/bats-output.txt; then
-                echo "Tests failed!"
-                exit 1
-              else
-                echo "All tests passed (bats exit $bats_exit due to skipped tests)"
-              fi
+          set +e
+          bats --print-output-on-failure tests/test-*.bats 2>&1 | tee /tmp/bats-unit-output.txt
+          bats_exit=${PIPESTATUS[0]}
+          set -e
+          if [[ $bats_exit -ne 0 ]]; then
+            if grep -q '^not ok' /tmp/bats-unit-output.txt; then
+              echo "Tests failed!"
+              exit 1
+            else
+              echo "All tests passed (bats exit $bats_exit due to skipped tests)"
             fi
-          else
-            echo "No unit tests found (tests/test-*.bats)"
-            echo "This is expected if no unit tests have been created yet"
           fi
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Mocked integration tests
+        env:
+          MOCK_ZFS: "yes"
+        run: |
+          set +e
+          bats --print-output-on-failure tests/integration/*.bats 2>&1 | tee /tmp/bats-integration-output.txt
+          bats_exit=${PIPESTATUS[0]}
+          set -e
+          if [[ $bats_exit -ne 0 ]]; then
+            if grep -q '^not ok' /tmp/bats-integration-output.txt; then
+              echo "Tests failed!"
+              exit 1
+            else
+              echo "All tests passed (bats exit $bats_exit due to skipped tests)"
+            fi
+          fi
+      - name: Failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: unit-test-results
+          name: zfs-unit-test-results-${{ github.run_id }}
           path: |
             .test-results/
             tests/*.log
+          if-no-files-found: ignore
           retention-days: 7
 
-  integration-tests-without-zfs:
-    name: Integration Tests (No ZFS)
+  # NOTE: this job used to call
+  # dinglebear-ai/workflows/.github/workflows/system-integration.yml, which
+  # hardcodes `runs-on: [self-hosted, ci-pool-system, ci-cap-zfs]` with no
+  # runner-override input — same zero-runners problem as above. Inlined here
+  # on ubuntu-latest, preserving the exact fail-closed
+  # capability-check/setup/test/cleanup sequence and commands the reusable
+  # workflow ran. Restore the `uses:` call once ci-pool-system/ci-cap-zfs
+  # runners exist for this repo.
+  system-integration:
+    name: Real ZFS integration
     runs-on: ubuntu-latest
-    needs: unit-tests
+    timeout-minutes: 30
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bats git curl jq
-
-      - name: Setup test environment
-        run: |
-          chmod +x tests/setup.sh
-          ./tests/setup.sh
-
-      - name: Run integration tests (mocked)
-        run: |
-          echo "=== Running Integration Tests (Mocked) ==="
-          if ls tests/integration/*.bats 1> /dev/null 2>&1; then
-            # Run with mocked ZFS commands
-            export MOCK_ZFS=yes
-            bats --print-output-on-failure tests/integration/*.bats || echo "Integration tests not yet implemented or failed"
-          else
-            echo "No integration tests found (tests/integration/*.bats)"
-            echo "This is expected if no integration tests have been created yet"
-          fi
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: integration-test-results-no-zfs
-          path: |
-            .test-results/
-            tests/*.log
-          retention-days: 7
-
-  integration-tests-with-zfs:
-    name: Integration Tests (With ZFS)
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
+          persist-credentials: false
       - name: Install ZFS
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zfsutils-linux bats git curl jq
-
-      - name: Load ZFS kernel module
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zfsutils-linux bats
+      - name: Install bats test helpers
+        # The reusable system-integration.yml this job replaces assumed the
+        # self-hosted ci-pool-system/ci-cap-zfs runner image already had
+        # bats-support/bats-assert/bats-file pre-baked, so it never installed
+        # them. A vanilla ubuntu-latest runner doesn't have them; without
+        # this the "Integration tests" step fails at `load` before running
+        # a single real test.
+        run: CI=1 ./tests/setup.sh
+      - name: Require capability
         run: |
-          sudo modprobe zfs || echo "ZFS module not available in GitHub Actions"
-
-      - name: Setup test environment
+          set -euo pipefail
+          sudo -n true &&
+          command -v bats &&
+          command -v zpool &&
+          command -v zfs &&
+          sudo modprobe zfs
+      - name: Setup isolated fixture
         run: |
-          chmod +x tests/setup.sh
-          ./tests/setup.sh
-
-      - name: Create test ZFS pool
+          set -euo pipefail
+          pool="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" &&
+          image="$RUNNER_TEMP/$pool.img" &&
+          sudo truncate -s 1G "$image" &&
+          sudo zpool create "$pool" "$image" &&
+          sudo zfs create "$pool/data"
+      - name: Integration tests
         run: |
-          # Create a small test pool
-          sudo truncate -s 1G /tmp/test-pool.img
-          if sudo zpool list >/dev/null 2>&1; then
-            sudo zpool create test-pool /tmp/test-pool.img
-            sudo zfs create test-pool/data
-            echo "Test ZFS pool created successfully"
-          else
-            echo "ZFS not available in this environment, tests will be skipped"
-          fi
-
-      - name: Run integration tests (real ZFS)
-        run: |
-          echo "=== Running Integration Tests (Real ZFS) ==="
-          if sudo zpool list test-pool >/dev/null 2>&1; then
-            export TEST_ZFS_POOL=test-pool
-            export USE_REAL_ZFS=yes
-            if ls tests/integration/*.bats 1> /dev/null 2>&1; then
-              sudo -E bats --print-output-on-failure tests/integration/*.bats || echo "Integration tests not yet implemented or failed"
-            else
-              echo "No integration tests found"
-            fi
-          else
-            echo "ZFS pool not available, skipping real ZFS tests"
-          fi
-
-      - name: Cleanup test pool
-        if: always()
-        run: |
-          sudo zpool destroy test-pool 2>/dev/null || true
-          sudo rm -f /tmp/test-pool.img
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          pool="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" &&
+          sudo -E env TEST_ZFS_POOL="$pool" USE_REAL_ZFS=yes \
+          bats --print-output-on-failure tests/integration/*.bats
+      - name: Failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: integration-test-results-with-zfs
-          path: |
-            .test-results/
-            tests/*.log
+          name: system-integration-failure-${{ github.run_id }}
+          path: .test-results
+          if-no-files-found: ignore
           retention-days: 7
-
-  syntax-check:
-    name: Bash Syntax Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check bash syntax
+      - name: Cleanup
+        if: always()
         run: |
-          echo "=== Checking Bash Syntax ==="
-          find . -name "*.sh" -type f | while read -r script; do
-            echo "Checking: $script"
-            bash -n "$script" || exit 1
-          done
-          echo "All scripts have valid syntax"
+          set -euo pipefail
+          pool="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}";
+          sudo zpool destroy "$pool" 2>/dev/null || true;
+          sudo rm -f "$RUNNER_TEMP/$pool.img"
+
+  # NOTE: the fleet `contract` and `workflow-policy` checks
+  # (dinglebear-ai/workflows/.github/workflows/fleet-contract.yml and
+  # fleet-policy.yml) also hardcode `runs-on: [self-hosted, ci-pool-ops]`
+  # with no override, and their entire purpose is enforcing that non-release
+  # jobs use fleet ci-pool-* runner labels — which directly conflicts with
+  # the ubuntu-latest fallback used above. They test fleet infrastructure
+  # conventions, not ZFS script behavior, so they are dropped here rather
+  # than reimplemented. Restore both `uses:` calls (and add them back to
+  # test-summary's needs/checks) once this repo has ci-pool-ops runners
+  # registered.
 
   test-summary:
     name: Test Summary
-    runs-on: ubuntu-latest
-    needs:
-      - shellcheck
-      - unit-tests
-      - integration-tests-without-zfs
-      - integration-tests-with-zfs
-      - syntax-check
     if: always()
+    needs: [shell, unit-tests, system-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Check test results
+      - name: Require every test lane
+        env:
+          SHELL: ${{ needs.shell.result }}
+          UNIT: ${{ needs.unit-tests.result }}
+          SYSTEM: ${{ needs.system-integration.result }}
         run: |
-          echo "=== Test Suite Summary ==="
-          echo ""
-          echo "ShellCheck: ${{ needs.shellcheck.result }}"
-          echo "Unit Tests: ${{ needs.unit-tests.result }}"
-          echo "Integration Tests (No ZFS): ${{ needs.integration-tests-without-zfs.result }}"
-          echo "Integration Tests (With ZFS): ${{ needs.integration-tests-with-zfs.result }}"
-          echo "Syntax Check: ${{ needs.syntax-check.result }}"
-          echo ""
-
-          if [[ "${{ needs.shellcheck.result }}" != "success" ]] || \
-             [[ "${{ needs.unit-tests.result }}" != "success" ]] || \
-             [[ "${{ needs.syntax-check.result }}" != "success" ]]; then
-            echo "❌ Required tests failed"
-            exit 1
-          else
-            echo "✅ All required tests passed"
-          fi
-
-      - name: Comment PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const summary = `## Test Results
-
-            | Test Suite | Result |
-            |------------|--------|
-            | ShellCheck | ${{ needs.shellcheck.result }} |
-            | Unit Tests | ${{ needs.unit-tests.result }} |
-            | Integration Tests (No ZFS) | ${{ needs.integration-tests-without-zfs.result }} |
-            | Integration Tests (With ZFS) | ${{ needs.integration-tests-with-zfs.result }} |
-            | Syntax Check | ${{ needs.syntax-check.result }} |
-
-            `;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: summary
-            });
+          test "$SHELL" = success
+          test "$UNIT" = success
+          test "$SYSTEM" = success

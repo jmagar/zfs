@@ -9,6 +9,7 @@ SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 
 # Source the transaction library
 if [[ -f "$SCRIPT_DIR/lib/zfs-transactions.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-transactions.sh"
 else
     echo "ERROR: Cannot find lib/zfs-transactions.sh" >&2
@@ -176,7 +177,7 @@ rollback_transaction() {
     # Show current state
     show_transaction_details "$tx_id"
 
-    read -p "Are you sure you want to rollback? (type 'yes' to confirm): " confirm
+    read -r -p "Are you sure you want to rollback? (type 'yes' to confirm): " confirm
 
     if [[ "$confirm" != "yes" ]]; then
         print_info "Rollback cancelled"
@@ -214,7 +215,7 @@ recover_all_transactions() {
     transaction_list_pending
     echo ""
 
-    read -p "Proceed with automatic recovery? (type 'yes' to confirm): " confirm
+    read -r -p "Proceed with automatic recovery? (type 'yes' to confirm): " confirm
 
     if [[ "$confirm" != "yes" ]]; then
         print_info "Automatic recovery cancelled"
@@ -244,7 +245,7 @@ cleanup_old_transactions() {
     echo "This will remove completed/rolled back transactions older than $age_days days"
     echo ""
 
-    read -p "Proceed with cleanup? (type 'yes' to confirm): " confirm
+    read -r -p "Proceed with cleanup? (type 'yes' to confirm): " confirm
 
     if [[ "$confirm" != "yes" ]]; then
         print_info "Cleanup cancelled"
@@ -273,35 +274,35 @@ interactive_mode() {
         echo "  5) Cleanup old transactions"
         echo "  6) Exit"
         echo ""
-        read -p "Enter choice [1-6]: " choice
+        read -r -p "Enter choice [1-6]: " choice
 
         case "$choice" in
             1)
                 list_pending_transactions
-                read -p "Press Enter to continue..."
+                read -r -p "Press Enter to continue..."
                 ;;
             2)
                 echo ""
-                read -p "Enter transaction ID: " tx_id
+                read -r -p "Enter transaction ID: " tx_id
                 show_transaction_details "$tx_id"
-                read -p "Press Enter to continue..."
+                read -r -p "Press Enter to continue..."
                 ;;
             3)
                 echo ""
-                read -p "Enter transaction ID: " tx_id
+                read -r -p "Enter transaction ID: " tx_id
                 rollback_transaction "$tx_id"
-                read -p "Press Enter to continue..."
+                read -r -p "Press Enter to continue..."
                 ;;
             4)
                 recover_all_transactions
-                read -p "Press Enter to continue..."
+                read -r -p "Press Enter to continue..."
                 ;;
             5)
                 echo ""
-                read -p "Enter age in days (default: 30): " age
+                read -r -p "Enter age in days (default: 30): " age
                 age=${age:-30}
                 cleanup_old_transactions "$age"
-                read -p "Press Enter to continue..."
+                read -r -p "Press Enter to continue..."
                 ;;
             6)
                 echo ""

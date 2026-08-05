@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source the shared configuration file
 if [[ -f "$SCRIPT_DIR/zfs-config.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved config, linted separately
     source "$SCRIPT_DIR/zfs-config.sh"
 else
     echo "ERROR: Cannot find zfs-config.sh in $SCRIPT_DIR" >&2
@@ -20,6 +21,7 @@ fi
 
 # Source the common library for shared functions
 if [[ -f "$SCRIPT_DIR/lib/zfs-common.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-common.sh"
 else
     log_message "WARNING" "Common library not found - some functions may not be available"
@@ -27,6 +29,7 @@ fi
 
 # Source the validation library for input validation
 if [[ -f "$SCRIPT_DIR/lib/zfs-validation.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-validation.sh"
 else
     log_message "WARNING" "Validation library not found - operating without input validation"
@@ -34,6 +37,7 @@ fi
 
 # Source the error handling library
 if [[ -f "$SCRIPT_DIR/lib/zfs-error-handling.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-error-handling.sh"
 else
     log_message "WARNING" "Error handling library not found - operating without enhanced error handling"
@@ -41,6 +45,7 @@ fi
 
 # Source the locking library for race condition prevention
 if [[ -f "$SCRIPT_DIR/lib/zfs-locking.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-locking.sh"
 else
     log_message "WARNING" "Locking library not found - operating without concurrency protection"
@@ -48,6 +53,7 @@ fi
 
 # Source the transaction library for rollback support
 if [[ -f "$SCRIPT_DIR/lib/zfs-transactions.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved library, linted separately
     source "$SCRIPT_DIR/lib/zfs-transactions.sh"
 else
     log_message "WARNING" "Transaction library not found - operating without rollback protection"
@@ -130,7 +136,9 @@ rotate_log() {
     if command -v stat >/dev/null 2>&1; then
         file_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
     else
-        file_size=$(ls -la "$LOG_FILE" 2>/dev/null | awk '{print $5}' || echo 0)
+        # Grouped so a failed input redirection is silenced too; `< file 2>/dev/null`
+        # applies redirections left to right, so the open error still reaches stderr.
+        file_size=$( { wc -c < "$LOG_FILE"; } 2>/dev/null || echo 0)
     fi
     
     # Convert LOG_MAX_SIZE to bytes (handles M, K suffixes)
@@ -345,7 +353,7 @@ stop_docker_containers() {
             fi
             
             # Extract the immediate child directory
-            local relative_path="${bindmount#$MOUNT_POINT/$source_path_appdata/}"
+            local relative_path="${bindmount#"$MOUNT_POINT/$source_path_appdata/"}"
             local immediate_child="${relative_path%%/*}"
             local combined_path="$MOUNT_POINT/$source_path_appdata/$immediate_child"
             
@@ -495,7 +503,7 @@ stop_virtual_machines() {
         # Extract the dataset path (directory containing the vdisk file)
         local dataset_path
         dataset_path=$(dirname "$vm_disk")
-        local relative_path="${dataset_path#$MOUNT_POINT/$source_path_vms/}"
+        local relative_path="${dataset_path#"$MOUNT_POINT/$source_path_vms/"}"
         local immediate_child="${relative_path%%/*}"
         local combined_path="$MOUNT_POINT/$source_path_vms/$immediate_child"
         

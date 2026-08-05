@@ -38,10 +38,12 @@ ZFS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source dependencies
 if [[ -f "$ZFS_LIB_DIR/zfs-error-handling.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_LIB_DIR/zfs-error-handling.sh"
 fi
 
 if [[ -f "$ZFS_LIB_DIR/zfs-common.sh" ]]; then
+    # shellcheck disable=SC1091 # runtime-resolved sibling library, linted separately
     source "$ZFS_LIB_DIR/zfs-common.sh"
 fi
 
